@@ -3,12 +3,36 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import settings
 
+# ✅ Read DB URL
+database_url = settings.database_url
+
+# 🔥 FIX for Railway MySQL
+if database_url and database_url.startswith("mysql://"):
+    database_url = database_url.replace(
+        "mysql://",
+        "mysql+pymysql://",
+        1,
+    )
+
+# ✅ SQLite special handling
 connect_args: dict[str, bool] = {}
-if settings.database_url.startswith("sqlite"):
+if database_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
 
-engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+# ✅ Create engine
+engine = create_engine(
+    database_url,
+    connect_args=connect_args,
+    pool_pre_ping=True,
+    future=True,
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    future=True,
+)
 
 
 class Base(DeclarativeBase):
@@ -21,4 +45,3 @@ def get_db():
         yield db
     finally:
         db.close()
-
