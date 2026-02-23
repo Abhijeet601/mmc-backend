@@ -121,7 +121,7 @@ def list_public_notices(
     db: Session = Depends(get_db),
 ) -> list[Notice]:
     now = datetime.now(timezone.utc)
-    stmt = select(Notice).where(Notice.published.is_(True)).where(
+    stmt = select(Notice).where(Notice.is_active.is_(True)).where(
         or_(Notice.publish_date.is_(None), Notice.publish_date <= now)
     )
 
@@ -190,7 +190,7 @@ async def create_notice(
         file_url=stored_file_url,
         file_name=stored_file_name,
         pinned=pinned,
-        published=published,
+        is_active=published,
         publish_date=parse_optional_datetime(publish_date, "publish_date") or datetime.now(timezone.utc),
         created_by_id=current_admin.id,
     )
@@ -236,7 +236,7 @@ async def update_notice(
     if pinned is not None:
         notice.pinned = pinned
     if published is not None:
-        notice.published = published
+        notice.is_active = published
     if publish_date is not None:
         parsed_publish_date = parse_optional_datetime(publish_date, "publish_date")
         notice.publish_date = parsed_publish_date or datetime.now(timezone.utc)

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 24 * 60
 
-    database_url: str = f"sqlite:///{(BASE_DIR / 'mmc.db').as_posix()}"
+    database_url: str = Field(
+        default=f"sqlite:///{(BASE_DIR / 'mmc.db').as_posix()}",
+        alias="DATABASE_URL",
+    )
     upload_dir: str = str(BASE_DIR / "uploads")
     notice_source_dir: str = str(BASE_DIR.parent / "frontend" / "data files" / "Notice")
 

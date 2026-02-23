@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import ensure_default_admin
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .migrations import migrate_notices_publish_date
+from .migrations import migrate_notices_is_active, migrate_notices_publish_date
 from .routers.auth import router as auth_router
 from .routers.notices import router as notices_router
 from .seed_notices import sync_notice_folder_to_db
@@ -32,6 +32,7 @@ def create_app() -> FastAPI:
     def startup_event() -> None:
         Base.metadata.create_all(bind=engine)
         migrate_notices_publish_date(engine)
+        migrate_notices_is_active(engine)
         with SessionLocal() as db:
             ensure_default_admin(db)
             sync_notice_folder_to_db(

@@ -26,6 +26,7 @@ class NoticeResponse(BaseModel):
     title: str
     description: str
     publish_to: NoticeCategory
+    is_active: bool
     link: str | None
     file_url: str | None
     file_name: str | None
