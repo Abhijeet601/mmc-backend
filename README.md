@@ -10,6 +10,13 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+## Deploy on Railway
+
+- Ensure the Railway service points to this `backend` directory (if your repo also has `frontend`).
+- A `Procfile` is included with an explicit start command:
+  `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`
+- Set environment variables from `.env.example` in Railway.
+
 ## Default admin
 
 - `username`: `admin`
