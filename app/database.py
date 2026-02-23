@@ -27,6 +27,14 @@ def _clean_env_value(value: str | None) -> str:
     return cleaned
 
 
+def _first_env_value(*keys: str) -> str:
+    for key in keys:
+        value = _clean_env_value(os.getenv(key))
+        if value:
+            return value
+    return ""
+
+
 def _is_usable_env_value(value: str) -> bool:
     return bool(value) and not _is_unresolved_env_reference(value)
 
@@ -40,11 +48,11 @@ def _is_parseable_database_url(url: str) -> bool:
 
 
 def _build_mysql_url_from_parts() -> str | None:
-    host = _clean_env_value(os.getenv("MYSQLHOST"))
-    port = _clean_env_value(os.getenv("MYSQLPORT"))
-    user = _clean_env_value(os.getenv("MYSQLUSER"))
-    password = _clean_env_value(os.getenv("MYSQLPASSWORD"))
-    database = _clean_env_value(os.getenv("MYSQLDATABASE"))
+    host = _first_env_value("MYSQLHOST", "MYSQL_HOST")
+    port = _first_env_value("MYSQLPORT", "MYSQL_PORT")
+    user = _first_env_value("MYSQLUSER", "MYSQL_USER")
+    password = _first_env_value("MYSQLPASSWORD", "MYSQL_PASSWORD", "MYSQL_ROOT_PASSWORD")
+    database = _first_env_value("MYSQLDATABASE", "MYSQL_DATABASE")
 
     required_parts = [host, port, user, password, database]
     if not all(_is_usable_env_value(part) for part in required_parts):
@@ -77,6 +85,7 @@ def _resolve_raw_database_url() -> str:
     candidates = [
         _clean_env_value(os.getenv("DATABASE_URL")),
         _clean_env_value(os.getenv("MYSQL_URL")),
+        _clean_env_value(os.getenv("MYSQL_PUBLIC_URL")),
     ]
 
     for candidate in candidates:
