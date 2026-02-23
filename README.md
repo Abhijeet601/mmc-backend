@@ -15,7 +15,11 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - Ensure the Railway service points to this `backend` directory (if your repo also has `frontend`).
 - A `Procfile` is included with an explicit start command:
   `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`
-- Set environment variables from `.env.example` in Railway.
+- Database env setup:
+  - Preferred: use Railway `MYSQL_URL` directly (auto-detected by the app).
+  - Or set `DATABASE_URL` to your MySQL URL (`mysql://...` is accepted and auto-converted).
+  - Avoid unresolved template values like `${{...}}` in the final runtime value.
+- Set remaining environment variables from `.env.example` in Railway.
 
 ## Default admin
 
