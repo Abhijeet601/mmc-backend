@@ -1,15 +1,17 @@
 import os
+import re
 
 from sqlalchemy import create_engine
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.engine import URL
 from sqlalchemy.engine.url import make_url
 
 from .config import settings
 
 
-def _is_unresolved_railway_reference(value: str) -> bool:
-    return value.startswith("${{") and value.endswith("}}")
+def _is_unresolved_env_reference(value: str) -> bool:
+    return bool(re.search(r"\$\{\{[^}]+\}\}|\$\{[^}]+\}", value))
 
 
 def _strip_wrapping_quotes(value: str) -> str:
@@ -18,20 +20,84 @@ def _strip_wrapping_quotes(value: str) -> str:
     return value
 
 
+def _clean_env_value(value: str | None) -> str:
+    if value is None:
+        return ""
+    cleaned = _strip_wrapping_quotes(value.strip())
+    return cleaned
+
+
+def _is_usable_env_value(value: str) -> bool:
+    return bool(value) and not _is_unresolved_env_reference(value)
+
+
+def _is_parseable_database_url(url: str) -> bool:
+    try:
+        make_url(normalize_database_url(url))
+        return True
+    except ArgumentError:
+        return False
+
+
+def _build_mysql_url_from_parts() -> str | None:
+    host = _clean_env_value(os.getenv("MYSQLHOST"))
+    port = _clean_env_value(os.getenv("MYSQLPORT"))
+    user = _clean_env_value(os.getenv("MYSQLUSER"))
+    password = _clean_env_value(os.getenv("MYSQLPASSWORD"))
+    database = _clean_env_value(os.getenv("MYSQLDATABASE"))
+
+    required_parts = [host, port, user, password, database]
+    if not all(_is_usable_env_value(part) for part in required_parts):
+        return None
+
+    try:
+        port_number = int(port)
+    except ValueError:
+        return None
+
+    mysql_url = URL.create(
+        drivername="mysql+pymysql",
+        username=user,
+        password=password,
+        host=host,
+        port=port_number,
+        database=database,
+    )
+    return mysql_url.render_as_string(hide_password=False)
+
+
+def _is_running_on_railway() -> bool:
+    railway_markers = ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
+    return any(os.getenv(marker) for marker in railway_markers)
+
+
 def _resolve_raw_database_url() -> str:
-    env_database_url = (os.getenv("DATABASE_URL") or "").strip()
-    env_mysql_url = (os.getenv("MYSQL_URL") or "").strip()
+    running_on_railway = _is_running_on_railway()
 
-    if env_database_url and not _is_unresolved_railway_reference(env_database_url):
-        return env_database_url
+    candidates = [
+        _clean_env_value(os.getenv("DATABASE_URL")),
+        _clean_env_value(os.getenv("MYSQL_URL")),
+    ]
 
-    if env_mysql_url:
-        return env_mysql_url
+    for candidate in candidates:
+        normalized_candidate = normalize_database_url(candidate)
+        if running_on_railway and normalized_candidate.startswith("sqlite"):
+            continue
+        if _is_usable_env_value(candidate) and _is_parseable_database_url(candidate):
+            return candidate
 
-    if env_database_url:
-        return env_database_url
+    mysql_from_parts = _build_mysql_url_from_parts()
+    if mysql_from_parts is not None:
+        return mysql_from_parts
 
-    return settings.database_url
+    if running_on_railway:
+        raise RuntimeError(
+            "No valid MySQL connection settings found on Railway. "
+            "Set MYSQL_URL or DATABASE_URL (mysql:// or mysql+pymysql://), "
+            "or provide MYSQLHOST, MYSQLPORT, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE."
+        )
+
+    return _clean_env_value(settings.database_url)
 
 
 def normalize_database_url(url: str) -> str:
@@ -53,7 +119,8 @@ def validate_database_url(url: str) -> str:
     except ArgumentError as exc:
         raise RuntimeError(
             "Invalid database URL. Configure Railway with MYSQL_URL, or set "
-            "DATABASE_URL to a valid SQLAlchemy URL (for MySQL use mysql:// or mysql+pymysql://)."
+            "DATABASE_URL to a valid SQLAlchemy URL (for MySQL use mysql:// or mysql+pymysql://). "
+            "Alternatively set MYSQLHOST, MYSQLPORT, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE."
         ) from exc
 
     return url
