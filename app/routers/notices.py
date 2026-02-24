@@ -151,11 +151,11 @@ def get_admin_notice(
     return get_notice_or_404(db, notice_id)
 
 
-@router.post("/admin", response_model=NoticeResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/admin", response_model=list[NoticeResponse], status_code=status.HTTP_201_CREATED)
 async def create_notice(
     title: str = Form(...),
     description: str = Form(default=""),
-    publish_to: NoticeCategory = Form(...),
+    publish_to: list[NoticeCategory] = Form(...),
     link: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     pinned: bool = Form(default=False),
@@ -164,12 +164,19 @@ async def create_notice(
     file: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
     current_admin: AdminUser = Depends(get_current_admin),
-) -> Notice:
+) -> list[Notice]:
     cleaned_title = title.strip()
     if not cleaned_title:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Title is required.",
+        )
+
+    publish_targets = list(dict.fromkeys(publish_to))
+    if not publish_targets:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one publish_to category is required.",
         )
 
     stored_file_url = normalize_optional_text(file_url)
@@ -180,23 +187,29 @@ async def create_notice(
         stored_file_url, stored_file_name = await upload_notice_attachment(file)
         uploaded_file_url_for_cleanup = stored_file_url
 
-    notice = Notice(
-        title=cleaned_title,
-        description=description.strip(),
-        publish_to=publish_to,
-        link=normalize_optional_text(link),
-        file_url=stored_file_url,
-        file_name=stored_file_name,
-        pinned=pinned,
-        is_active=published,
-        publish_date=parse_optional_datetime(publish_date, "publish_date") or datetime.now(timezone.utc),
-        created_by_id=current_admin.id,
-    )
+    notice_publish_date = parse_optional_datetime(publish_date, "publish_date") or datetime.now(timezone.utc)
+    notices: list[Notice] = []
+
+    for target in publish_targets:
+        notice = Notice(
+            title=cleaned_title,
+            description=description.strip(),
+            publish_to=target,
+            link=normalize_optional_text(link),
+            file_url=stored_file_url,
+            file_name=stored_file_name,
+            pinned=pinned,
+            is_active=published,
+            publish_date=notice_publish_date,
+            created_by_id=current_admin.id,
+        )
+        db.add(notice)
+        notices.append(notice)
 
     try:
-        db.add(notice)
         db.commit()
-        db.refresh(notice)
+        for notice in notices:
+            db.refresh(notice)
     except SQLAlchemyError as exc:
         db.rollback()
         await safe_delete_notice_file(uploaded_file_url_for_cleanup)
@@ -205,7 +218,7 @@ async def create_notice(
             detail="Failed to save notice in database.",
         ) from exc
 
-    return notice
+    return notices
 
 
 @router.patch("/admin/{notice_id}", response_model=NoticeResponse)
