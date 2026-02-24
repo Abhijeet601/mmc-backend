@@ -4,18 +4,14 @@ import re
 import shutil
 from urllib.parse import quote
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from .models import Notice, NoticeCategory
 
 ALLOWED_NOTICE_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"}
 SEEDED_CATEGORIES = (NoticeCategory.NOTICES, NoticeCategory.NOTIFICATIONS)
-BLOCKED_NOTICE_BASE_TITLES = {
-    "anti ragging committee 2024",
-    "nirf 2025",
-    "notice for awantika hostel demolishing material auction",
-}
+BLOCKED_NOTICE_BASE_TITLES: set[str] = set()
 
 DATE_PATTERNS = (
     r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",  # 10.12.2025, 10-12-2025, 10/12/2025
@@ -67,6 +63,71 @@ def remove_blocked_notices(db: Session) -> int:
     return deleted
 
 
+def build_notice_insert_columns(table_columns: set[str]) -> list[str]:
+    insert_columns = [
+        "title",
+        "description",
+        "publish_to",
+        "link",
+        "file_url",
+        "file_name",
+        "pinned",
+        "created_by_id",
+    ]
+
+    if "published" in table_columns:
+        insert_columns.append("published")
+    if "is_active" in table_columns:
+        insert_columns.append("is_active")
+    if "publish_date" in table_columns:
+        insert_columns.append("publish_date")
+    if "created_at" in table_columns:
+        insert_columns.append("created_at")
+    if "updated_at" in table_columns:
+        insert_columns.append("updated_at")
+
+    return insert_columns
+
+
+def insert_notice_row(
+    db: Session,
+    *,
+    insert_columns: list[str],
+    title: str,
+    publish_to: NoticeCategory,
+    file_url: str,
+    file_name: str,
+) -> None:
+    placeholders = ", ".join(f":{column}" for column in insert_columns)
+    column_sql = ", ".join(insert_columns)
+    insert_stmt = text(f"INSERT INTO notices ({column_sql}) VALUES ({placeholders})")
+
+    now = datetime.now(timezone.utc)
+    params: dict[str, object | None] = {
+        "title": title,
+        "description": "",
+        "publish_to": publish_to.value,
+        "link": None,
+        "file_url": file_url,
+        "file_name": file_name,
+        "pinned": False,
+        "created_by_id": None,
+    }
+
+    if "published" in insert_columns:
+        params["published"] = True
+    if "is_active" in insert_columns:
+        params["is_active"] = True
+    if "publish_date" in insert_columns:
+        params["publish_date"] = now
+    if "created_at" in insert_columns:
+        params["created_at"] = now
+    if "updated_at" in insert_columns:
+        params["updated_at"] = now
+
+    db.execute(insert_stmt, params)
+
+
 def sync_notice_folder_to_db(
     db: Session,
     *,
@@ -80,6 +141,9 @@ def sync_notice_folder_to_db(
 
     target_dir = upload_root / "source-notices"
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    table_columns = {column["name"] for column in inspect(db.bind).get_columns("notices")}
+    insert_columns = build_notice_insert_columns(table_columns)
 
     existing_pairs = set(
         db.execute(
@@ -132,18 +196,14 @@ def sync_notice_folder_to_db(
                         updated_count += 1
                 continue
 
-            notice = Notice(
+            insert_notice_row(
+                db,
+                insert_columns=insert_columns,
                 title=normalized_title,
-                description="",
                 publish_to=category,
-                link=None,
                 file_url=normalized_file_url,
                 file_name=file_path.name,
-                published=True,
-                pinned=False,
-                publish_date=datetime.now(timezone.utc),
             )
-            db.add(notice)
             existing_pairs.add(key)
             created_count += 1
 

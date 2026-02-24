@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -18,6 +18,17 @@ class Settings(BaseSettings):
         default=f"sqlite:///{(BASE_DIR / 'mmc.db').as_posix()}",
         alias="DATABASE_URL",
     )
+    r2_endpoint: str = Field(default="", alias="R2_ENDPOINT")
+    r2_access_key_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("R2_ACCESS_KEY_ID", "R2_ACCESS_KEY"),
+    )
+    r2_secret_access_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("R2_SECRET_ACCESS_KEY", "R2_SECRET_KEY"),
+    )
+    r2_bucket: str = Field(default="", alias="R2_BUCKET")
+    r2_public_url: str = Field(default="", alias="R2_PUBLIC_URL")
     upload_dir: str = str(BASE_DIR / "uploads")
     notice_source_dir: str = str(BASE_DIR.parent / "frontend" / "data files" / "Notice")
 
@@ -55,6 +66,25 @@ class Settings(BaseSettings):
             return None
         cleaned = value.strip()
         return cleaned or None
+
+    @field_validator(
+        "r2_endpoint",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "r2_bucket",
+        "r2_public_url",
+        mode="before",
+    )
+    @classmethod
+    def parse_optional_text(cls, value: str | None) -> str:
+        if value is None:
+            return ""
+        return value.strip()
+
+    @field_validator("r2_endpoint", "r2_public_url", mode="after")
+    @classmethod
+    def strip_trailing_slash(cls, value: str) -> str:
+        return value.rstrip("/")
 
 
 settings = Settings()

@@ -1,20 +1,27 @@
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from urllib.parse import urlparse
-from uuid import uuid4
-import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import desc, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..database import get_db
 from ..dependencies import get_current_admin
 from ..models import AdminUser, Notice, NoticeCategory
 from ..schemas import CategoryItem, NoticeResponse
+from ..storage import (
+    R2ConfigurationError,
+    R2StorageError,
+    delete_notice_file_by_url,
+    is_managed_notice_file_url,
+    upload_notice_file,
+)
 
 router = APIRouter(prefix="/notices", tags=["notices"])
+logger = logging.getLogger(__name__)
 
 CATEGORY_LABELS: dict[NoticeCategory, str] = {
     NoticeCategory.TENDERS: "Tenders",
@@ -65,41 +72,30 @@ def file_name_from_url(file_url: str | None) -> str | None:
     return name or None
 
 
-def get_upload_root() -> Path:
-    root = Path(settings.upload_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+async def upload_notice_attachment(file: UploadFile) -> tuple[str, str]:
+    try:
+        uploaded = await upload_notice_file(file)
+    except R2ConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+    except R2StorageError as exc:
+        message = str(exc)
+        http_status = status.HTTP_422_UNPROCESSABLE_ENTITY if "empty" in message.lower() else status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(status_code=http_status, detail=message) from exc
+
+    return uploaded.public_url, uploaded.original_name
 
 
-async def save_upload_file(file: UploadFile) -> tuple[str, str]:
-    upload_root = get_upload_root()
-    target_dir = upload_root / "notices"
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    original_name = (file.filename or "upload").strip() or "upload"
-    suffix = Path(original_name).suffix
-    generated_name = f"{uuid4().hex}{suffix}"
-    target_path = target_dir / generated_name
-
-    with target_path.open("wb") as out_file:
-        shutil.copyfileobj(file.file, out_file)
-
-    await file.close()
-    return f"/uploads/notices/{generated_name}", original_name
-
-
-def delete_uploaded_file(file_url: str | None) -> None:
-    if not file_url or not file_url.startswith("/uploads/"):
+async def safe_delete_notice_file(file_url: str | None) -> None:
+    if not is_managed_notice_file_url(file_url):
         return
 
-    upload_root = get_upload_root()
-    relative_path = file_url[len("/uploads/") :]
-    candidate = (upload_root / relative_path).resolve()
-    if upload_root not in candidate.parents:
-        return
-
-    if candidate.exists() and candidate.is_file():
-        candidate.unlink()
+    try:
+        await delete_notice_file_by_url(file_url)
+    except (R2ConfigurationError, R2StorageError):
+        logger.warning("Failed to delete R2 object for notice file URL: %s", file_url, exc_info=True)
 
 
 def get_notice_or_404(db: Session, notice_id: int) -> Notice:
@@ -178,9 +174,11 @@ async def create_notice(
 
     stored_file_url = normalize_optional_text(file_url)
     stored_file_name = file_name_from_url(stored_file_url)
+    uploaded_file_url_for_cleanup: str | None = None
 
     if file is not None:
-        stored_file_url, stored_file_name = await save_upload_file(file)
+        stored_file_url, stored_file_name = await upload_notice_attachment(file)
+        uploaded_file_url_for_cleanup = stored_file_url
 
     notice = Notice(
         title=cleaned_title,
@@ -194,9 +192,19 @@ async def create_notice(
         publish_date=parse_optional_datetime(publish_date, "publish_date") or datetime.now(timezone.utc),
         created_by_id=current_admin.id,
     )
-    db.add(notice)
-    db.commit()
-    db.refresh(notice)
+
+    try:
+        db.add(notice)
+        db.commit()
+        db.refresh(notice)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        await safe_delete_notice_file(uploaded_file_url_for_cleanup)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save notice in database.",
+        ) from exc
+
     return notice
 
 
@@ -217,6 +225,8 @@ async def update_notice(
     _: AdminUser = Depends(get_current_admin),
 ) -> Notice:
     notice = get_notice_or_404(db, notice_id)
+    previous_file_url = notice.file_url
+    uploaded_file_url_for_cleanup: str | None = None
 
     if title is not None:
         cleaned_title = title.strip()
@@ -242,33 +252,53 @@ async def update_notice(
         notice.publish_date = parsed_publish_date or datetime.now(timezone.utc)
 
     if file is not None:
-        delete_uploaded_file(notice.file_url)
-        notice.file_url, notice.file_name = await save_upload_file(file)
+        notice.file_url, notice.file_name = await upload_notice_attachment(file)
+        uploaded_file_url_for_cleanup = notice.file_url
     elif remove_file:
-        delete_uploaded_file(notice.file_url)
         notice.file_url = None
         notice.file_name = None
     elif file_url is not None:
         normalized_url = normalize_optional_text(file_url)
-        if normalized_url != notice.file_url:
-            delete_uploaded_file(notice.file_url)
         notice.file_url = normalized_url
         notice.file_name = file_name_from_url(normalized_url)
 
-    db.add(notice)
-    db.commit()
-    db.refresh(notice)
+    try:
+        db.add(notice)
+        db.commit()
+        db.refresh(notice)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        if uploaded_file_url_for_cleanup and uploaded_file_url_for_cleanup != previous_file_url:
+            await safe_delete_notice_file(uploaded_file_url_for_cleanup)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update notice in database.",
+        ) from exc
+
+    if previous_file_url != notice.file_url:
+        await safe_delete_notice_file(previous_file_url)
+
     return notice
 
 
 @router.delete("/admin/{notice_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_notice(
+async def delete_notice(
     notice_id: int,
     db: Session = Depends(get_db),
     _: AdminUser = Depends(get_current_admin),
 ) -> None:
     notice = get_notice_or_404(db, notice_id)
-    delete_uploaded_file(notice.file_url)
-    db.delete(notice)
-    db.commit()
+    file_url = notice.file_url
+
+    try:
+        db.delete(notice)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete notice from database.",
+        ) from exc
+
+    await safe_delete_notice_file(file_url)
     return None
