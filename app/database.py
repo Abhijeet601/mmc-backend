@@ -9,9 +9,11 @@ from sqlalchemy.engine.url import make_url
 
 from .config import settings
 
+REFERENCE_PATTERN = re.compile(r"\$\{\{([^}]+)\}\}|\$\{([^}]+)\}|\{\{([^}]+)\}\}")
+
 
 def _is_unresolved_env_reference(value: str) -> bool:
-    return bool(re.search(r"\$\{\{[^}]+\}\}|\$\{[^}]+\}", value))
+    return bool(REFERENCE_PATTERN.search(value))
 
 
 def _strip_wrapping_quotes(value: str) -> str:
@@ -24,7 +26,57 @@ def _clean_env_value(value: str | None) -> str:
     if value is None:
         return ""
     cleaned = _strip_wrapping_quotes(value.strip())
-    return cleaned
+    expanded = _expand_env_references(cleaned)
+    return _strip_wrapping_quotes(expanded.strip())
+
+
+def _lookup_placeholder_value(token: str) -> str:
+    normalized = token.strip()
+    candidates = [
+        normalized,
+        normalized.upper(),
+        normalized.replace(".", "_"),
+        normalized.replace(".", "_").upper(),
+    ]
+
+    if "." in normalized:
+        tail = normalized.split(".")[-1]
+        candidates.extend([tail, tail.upper(), tail.replace(".", "_"), tail.replace(".", "_").upper()])
+    else:
+        tail = normalized
+
+    if tail.endswith("_URL"):
+        candidates.extend(
+            [
+                tail.replace("_URL", "_PUBLIC_URL"),
+                tail.replace("_URL", "_PRIVATE_URL"),
+                tail.replace("_URL", "_PUBLIC_URL").upper(),
+                tail.replace("_URL", "_PRIVATE_URL").upper(),
+            ]
+        )
+
+    seen: set[str] = set()
+    for key in candidates:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        env_val = os.getenv(key)
+        if env_val is None:
+            continue
+        cleaned = _strip_wrapping_quotes(env_val.strip())
+        if cleaned:
+            return cleaned
+
+    return ""
+
+
+def _expand_env_references(value: str) -> str:
+    def replacer(match: re.Match[str]) -> str:
+        token = next((group for group in match.groups() if group), "")
+        replacement = _lookup_placeholder_value(token)
+        return replacement if replacement else match.group(0)
+
+    return REFERENCE_PATTERN.sub(replacer, value)
 
 
 def _first_env_value(*keys: str) -> str:
@@ -79,6 +131,26 @@ def _is_running_on_railway() -> bool:
     return any(os.getenv(marker) for marker in railway_markers)
 
 
+def _present_mysql_env_keys() -> list[str]:
+    keys = [
+        "DATABASE_URL",
+        "MYSQL_URL",
+        "MYSQL_PUBLIC_URL",
+        "MYSQLHOST",
+        "MYSQL_HOST",
+        "MYSQLPORT",
+        "MYSQL_PORT",
+        "MYSQLUSER",
+        "MYSQL_USER",
+        "MYSQLPASSWORD",
+        "MYSQL_PASSWORD",
+        "MYSQL_ROOT_PASSWORD",
+        "MYSQLDATABASE",
+        "MYSQL_DATABASE",
+    ]
+    return [key for key in keys if _clean_env_value(os.getenv(key))]
+
+
 def _resolve_raw_database_url() -> str:
     running_on_railway = _is_running_on_railway()
 
@@ -100,10 +172,12 @@ def _resolve_raw_database_url() -> str:
         return mysql_from_parts
 
     if running_on_railway:
+        present_keys = ", ".join(_present_mysql_env_keys()) or "none"
         raise RuntimeError(
             "No valid MySQL connection settings found on Railway. "
             "Set MYSQL_URL or DATABASE_URL (mysql:// or mysql+pymysql://), "
-            "or provide MYSQLHOST, MYSQLPORT, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE."
+            "or provide MYSQLHOST, MYSQLPORT, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE. "
+            f"Detected env keys: {present_keys}."
         )
 
     return _clean_env_value(settings.database_url)
