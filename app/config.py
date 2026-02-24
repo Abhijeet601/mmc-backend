@@ -27,6 +27,10 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+    cors_allow_origin_regex: str | None = Field(
+        default=r"^https://.+$",
+        alias="CORS_ALLOW_ORIGIN_REGEX",
+    )
 
     admin_username: str = "admin"
     admin_password: str = "admin123"
@@ -43,6 +47,14 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @field_validator("cors_allow_origin_regex", mode="before")
+    @classmethod
+    def parse_cors_allow_origin_regex(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 settings = Settings()
