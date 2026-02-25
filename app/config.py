@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
 
     admin_username: str = "admin"
-    admin_password: str = "admin123"
+    admin_password: str = "Magadh@#2026"
 
     model_config = SettingsConfigDict(
         env_file=".env",
