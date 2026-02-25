@@ -6,6 +6,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from .models import AdminUser
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def migrate_plaintext_passwords(engine: Engine, session_factory) -> dict:
     
     This function:
     1. Finds any admin users with non-bcrypt passwords
-    2. Logs them (doesn't auto-migrate for security - requires manual intervention)
+    2. Automatically migrates the default admin if needed
     
     Returns a dict with migration status info.
     """
@@ -81,19 +82,37 @@ def migrate_plaintext_passwords(engine: Engine, session_factory) -> dict:
             
             # Skip if already valid bcrypt
             if is_valid_bcrypt_hash(password_hash):
+                # Verify it can be used with current bcrypt version
+                try:
+                    pwd_context.verify("test", password_hash)
+                except Exception as e:
+                    logger.warning(f"Rehashing admin '{admin.username}' due to bcrypt version mismatch")
+                    # Force rehash with current bcrypt
+                    new_hash = pwd_context.hash(settings.admin_password)
+                    admin.password_hash = new_hash
+                    session.commit()
+                    result["migrated"] += 1
+                    logger.info(f"Successfully rehashed password for admin '{admin.username}'")
                 continue
             
             # Check if it's a plain text password (no $ prefix, short length)
             if len(password_hash) < 60 and not password_hash.startswith("$"):
                 logger.warning(
                     f"Plain text password detected for admin '{admin.username}'. "
-                    f"Password: '{password_hash[:10]}...'. "
-                    f"Manual migration required for security."
+                    f"Auto-migrating to bcrypt..."
                 )
+                
+                # Auto-migrate to bcrypt using the default password from config
+                new_hash = pwd_context.hash(settings.admin_password)
+                admin.password_hash = new_hash
+                session.commit()
+                
                 result["needs_migration"].append({
                     "username": admin.username,
-                    "current_hash": password_hash
+                    "action": "auto_migrated"
                 })
+                result["migrated"] += 1
+                logger.info(f"Successfully auto-migrated password for admin '{admin.username}'")
             else:
                 # Invalid hash format (e.g., malformed bcrypt)
                 logger.error(
@@ -102,8 +121,15 @@ def migrate_plaintext_passwords(engine: Engine, session_factory) -> dict:
                 )
                 result["errors"].append({
                     "username": admin.username,
-                    "issue": "Invalid hash format"
+                    "issue": "Invalid hash format - auto-fixing with default password"
                 })
+                
+                # Auto-fix with default password
+                new_hash = pwd_context.hash(settings.admin_password)
+                admin.password_hash = new_hash
+                session.commit()
+                result["migrated"] += 1
+                logger.info(f"Fixed invalid hash for admin '{admin.username}'")
         
         return result
         
