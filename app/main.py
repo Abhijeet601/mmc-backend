@@ -8,7 +8,13 @@ from fastapi.staticfiles import StaticFiles
 from .auth import ensure_default_admin
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .migrations import migrate_notices_is_active, migrate_notices_publish_date, migrate_plaintext_passwords
+from .migrations import (
+    migrate_admin_users_username,
+    migrate_notices_is_active,
+    migrate_notices_publish_date,
+    migrate_notices_publish_to_values,
+    migrate_plaintext_passwords,
+)
 from .routers.auth import router as auth_router
 from .routers.notices import router as notices_router
 from .seed_notices import sync_notice_folder_to_db
@@ -35,8 +41,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def startup_event() -> None:
         Base.metadata.create_all(bind=engine)
+        migrate_admin_users_username(engine)
         migrate_notices_publish_date(engine)
         migrate_notices_is_active(engine)
+        migrate_notices_publish_to_values(engine)
         
         # Check for plain text passwords on startup
         logger.info("Running password migration check on startup...")

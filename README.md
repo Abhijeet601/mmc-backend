@@ -1,4 +1,4 @@
-# MMC Backend (FastAPI)
+# MMC Backend
 
 ## Run locally
 
@@ -10,35 +10,37 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## Deploy on Railway
+## Database
 
-- Ensure the Railway service points to this `backend` directory (if your repo also has `frontend`).
-- A `Procfile` is included with an explicit start command:
-  `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`
-- Database env setup:
-  - Preferred: use Railway `MYSQL_URL` directly (auto-detected by the app).
-  - Or set `DATABASE_URL` to your MySQL URL (`mysql://...` is accepted and auto-converted).
-  - Avoid unresolved template values like `${{...}}` in the final runtime value.
-- Set remaining environment variables from `.env.example` in Railway.
+`DATABASE_URL` supports:
+
+- `sqlite:///./mmc.db` for local development
+- `postgresql+psycopg2://...` for PostgreSQL
+- `mysql+pymysql://...` for MySQL
+
+See `.env.example` for upload, database, and admin settings.
 
 ## Default admin
 
 - `username`: `admin`
 - `password`: `admin123`
 
-Change these via `.env`.
+Change these with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 
-## Key endpoints
+## Available endpoints
 
 - `POST /api/admin/login`
 - `GET /api/admin/me`
-- `GET /api/notices?publish_to=tenders|upcoming_events|notifications|notices`
-- `GET /api/notices/admin` (auth)
-- `POST /api/notices/admin` (auth, multipart form)
-- `PATCH /api/notices/admin/{id}` (auth, multipart form)
-- `DELETE /api/notices/admin/{id}` (auth)
+- `GET /api/notices/categories`
+- `GET /api/notices`
+- `GET /api/notices/admin`
+- `GET /api/notices/admin/{id}`
+- `POST /api/notices/admin`
+- `PATCH /api/notices/admin/{id}`
+- `DELETE /api/notices/admin/{id}`
 
-`POST/PATCH /api/notices/admin` supports `publish_date` (ISO datetime) to schedule publication.
+## Notes
 
-On startup, the backend also auto-imports files from `NOTICE_SOURCE_DIR` (default: `../frontend/data files/Notice`)
-into both `publish_to=notices` and `publish_to=notifications`, and serves them via `/uploads/source-notices/...`.
+- This backend now excludes the Hostel ERP codebase.
+- The standalone Hostel ERP backend lives in `hostel-erp-backend/`.
+- Notices and admin notice management routes remain available under `/api/notices`.

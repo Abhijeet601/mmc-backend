@@ -23,9 +23,29 @@ class AdminUser(Base):
     __tablename__ = "admin_users"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("1"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        onupdate=utc_now,
+        nullable=False,
+    )
 
     notices: Mapped[list["Notice"]] = relationship(back_populates="created_by_admin")
 

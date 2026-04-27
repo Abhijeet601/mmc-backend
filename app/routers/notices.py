@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import desc, or_, select
@@ -22,6 +23,7 @@ from ..storage import (
 
 router = APIRouter(prefix="/notices", tags=["notices"])
 logger = logging.getLogger(__name__)
+LOCAL_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 CATEGORY_LABELS: dict[NoticeCategory, str] = {
     NoticeCategory.TENDERS: "Tenders",
@@ -51,7 +53,7 @@ def parse_optional_datetime(value: str | None, field_name: str) -> datetime | No
         ) from exc
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=LOCAL_TIMEZONE)
 
     return parsed.astimezone(timezone.utc)
 

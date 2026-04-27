@@ -1,4 +1,5 @@
 import logging
+import re
 
 from passlib.context import CryptContext
 from sqlalchemy import inspect, select, text
@@ -11,6 +12,116 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def _normalize_username(candidate: str | None, fallback: str) -> str:
+    raw = (candidate or "").strip().lower()
+    if "@" in raw:
+        raw = raw.split("@", 1)[0]
+    raw = re.sub(r"[^a-z0-9._-]+", "_", raw).strip("._-")
+    return raw or fallback
+
+
+def _unique_email_candidate(base_username: str, used_emails: set[str]) -> str:
+    candidate = f"{base_username}@admin.local"
+    if candidate not in used_emails:
+        return candidate
+
+    suffix = 1
+    while True:
+        candidate = f"{base_username}{suffix}@admin.local"
+        if candidate not in used_emails:
+            return candidate
+        suffix += 1
+
+
+def migrate_admin_users_schema(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "admin_users" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("admin_users")}
+
+    with engine.begin() as connection:
+        if "username" not in columns:
+            logger.info("Adding missing 'username' column to admin_users table.")
+            connection.execute(text("ALTER TABLE admin_users ADD COLUMN username VARCHAR(100)"))
+            columns.add("username")
+
+        if "email" not in columns:
+            logger.info("Adding missing 'email' column to admin_users table.")
+            connection.execute(text("ALTER TABLE admin_users ADD COLUMN email VARCHAR(255)"))
+            columns.add("email")
+
+        if "is_active" not in columns:
+            logger.info("Adding missing 'is_active' column to admin_users table.")
+            connection.execute(text("ALTER TABLE admin_users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1"))
+            columns.add("is_active")
+
+        if "updated_at" not in columns:
+            logger.info("Adding missing 'updated_at' column to admin_users table.")
+            connection.execute(text("ALTER TABLE admin_users ADD COLUMN updated_at DATETIME"))
+            columns.add("updated_at")
+
+        existing_rows = connection.execute(
+            text(
+                "SELECT id, email, username, created_at, updated_at, is_active "
+                "FROM admin_users ORDER BY id"
+            )
+        ).mappings().all()
+
+        used_usernames: set[str] = set()
+        used_emails: set[str] = set()
+        for row in existing_rows:
+            current_email = (row.get("email") or "").strip().lower()
+            current_username = row.get("username")
+
+            base_username = _normalize_username(current_username or current_email, settings.admin_username)
+            username = base_username
+            suffix = 1
+            while username in used_usernames:
+                suffix += 1
+                username = f"{base_username}{suffix}"
+            used_usernames.add(username)
+
+            email = current_email or _unique_email_candidate(base_username, used_emails)
+            while email in used_emails:
+                email = _unique_email_candidate(base_username, used_emails)
+            used_emails.add(email)
+
+            connection.execute(
+                text(
+                    "UPDATE admin_users "
+                    "SET username = :username, "
+                    "email = :email, "
+                    "is_active = COALESCE(is_active, 1), "
+                    "updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) "
+                    "WHERE id = :id"
+                ),
+                {
+                    "username": username,
+                    "email": email,
+                    "id": row["id"],
+                },
+            )
+
+        try:
+            connection.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_username ON admin_users (username)")
+            )
+        except Exception:
+            logger.warning("Unable to create unique index on admin_users.username", exc_info=True)
+
+        try:
+            connection.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_email ON admin_users (email)")
+            )
+        except Exception:
+            logger.warning("Unable to create unique index on admin_users.email", exc_info=True)
+
+
+def migrate_admin_users_username(engine: Engine) -> None:
+    migrate_admin_users_schema(engine)
 
 
 def migrate_notices_publish_date(engine: Engine) -> None:
@@ -42,6 +153,25 @@ def migrate_notices_is_active(engine: Engine) -> None:
         connection.execute(text("ALTER TABLE notices ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1"))
         if "published" in columns:
             connection.execute(text("UPDATE notices SET is_active = published"))
+
+
+def migrate_notices_publish_to_values(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "notices" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("notices")}
+    if "publish_to" not in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE notices "
+                "SET publish_to = LOWER(TRIM(publish_to)) "
+                "WHERE publish_to IS NOT NULL"
+            )
+        )
 
 
 def is_valid_bcrypt_hash(password_hash: str) -> bool:

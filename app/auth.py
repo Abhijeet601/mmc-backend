@@ -77,6 +77,10 @@ def authenticate_admin(db: Session, username: str, password: str) -> AdminUser |
     if not admin:
         logger.warning(f"Admin user not found: {username}")
         return None
+
+    if not admin.is_active:
+        logger.warning(f"Inactive admin attempted login: {username}")
+        return None
     
     if not verify_password(password, admin.password_hash):
         logger.warning(f"Password verification failed for username: {username}")
@@ -89,11 +93,38 @@ def authenticate_admin(db: Session, username: str, password: str) -> AdminUser |
 def ensure_default_admin(db: Session) -> None:
     existing = db.scalar(select(AdminUser).where(AdminUser.username == settings.admin_username))
     if existing:
+        changed = False
+        if not existing.email:
+            existing.email = settings.default_admin_email
+            changed = True
+        if not existing.is_active:
+            existing.is_active = True
+            changed = True
+
+        current_password_ok = verify_password(settings.admin_password, existing.password_hash)
+        legacy_password_ok = (
+            settings.default_admin_password != settings.admin_password
+            and verify_password(settings.default_admin_password, existing.password_hash)
+        )
+
+        if not current_password_ok and legacy_password_ok:
+            logger.info(
+                "Migrating legacy default admin password to current ADMIN_PASSWORD for username '%s'.",
+                existing.username,
+            )
+            existing.password_hash = get_password_hash(settings.admin_password)
+            changed = True
+
+        if changed:
+            db.add(existing)
+            db.commit()
         return
 
     default_admin = AdminUser(
+        email=settings.default_admin_email,
         username=settings.admin_username,
         password_hash=get_password_hash(settings.admin_password),
+        is_active=True,
     )
     db.add(default_admin)
     db.commit()
