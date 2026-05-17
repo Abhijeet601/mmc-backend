@@ -138,3 +138,16 @@ def create_social_event(
     db.commit()
     db.refresh(event)
     return event
+
+
+@router.delete("/social-events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_social_event(event_id: int, db: Session = Depends(get_db)):
+    event = db.get(SocialEvent, event_id)
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Social event not found.")
+
+    # soft-delete: mark as inactive
+    event.is_active = False
+    db.add(event)
+    db.commit()
+    return
