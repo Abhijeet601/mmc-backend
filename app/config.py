@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         populate_by_name=True,
         extra="ignore",
@@ -34,7 +37,29 @@ class Settings(BaseSettings):
     CORS_ALLOW_ORIGIN_REGEX: str | None = None
 
     UPLOAD_DIR: str = "uploads"
+    PHOTO_DIR: str = "uploads/photos"
+    RECEIPT_DIR: str = "uploads/receipts"
     NOTICE_SOURCE_DIR: str = "../frontend/data files/Notice"
+
+    APP_PAYMENT_AMOUNT: int = 1000
+    VAIDEHI_HOSTEL_FEE: int = 10000
+    MAHIMA_HOSTEL_FEE: int = 12000
+    DEMO_AUTO_APPROVE: bool = False
+    PAYMENT_PROVIDER: str = "demo"
+    PAYMENT_MERCHANT_ID: str | None = None
+    PAYMENT_MERCHANT_NAME: str | None = None
+    PAYMENT_MERCHANT_ROLE: str | None = None
+    PAYMENT_MERCHANT_STATUS: str | None = None
+    PAYMENT_LOGIN_PASSWORD: str | None = None
+    PAYMENT_TRANSACTION_PASSWORD: str | None = None
+    PAYMENT_PUBLIC_KEY: str | None = None
+    PAYMENT_SECRET_KEY: str | None = None
+    PAYMENT_CALLBACK_URL: str | None = None
+    PAYMENT_RETURN_URL: str | None = None
+    PAYMENT_WEBHOOK_SECRET: str | None = None
+    PAYMENT_BANK_ACCOUNT: str | None = None
+    PAYMENT_BANK_IFSC: str | None = None
+    PAYMENT_BANK_BRANCH: str | None = None
 
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "admin123"
@@ -52,6 +77,13 @@ class Settings(BaseSettings):
     )
     R2_BUCKET: str | None = None
     R2_PUBLIC_URL: str | None = None
+
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM_EMAIL: str | None = None
+    SMTP_USE_TLS: bool = True
 
     AUTO_CREATE_TABLES: bool = True
 
@@ -103,8 +135,33 @@ class Settings(BaseSettings):
         return self.UPLOAD_DIR
 
     @property
+    def photo_dir(self) -> str:
+        return self.PHOTO_DIR
+
+    @property
+    def receipt_dir(self) -> str:
+        return self.RECEIPT_DIR
+
+    @property
     def notice_source_dir(self) -> str:
         return self.NOTICE_SOURCE_DIR
+
+    @property
+    def payment_provider_public_config(self) -> dict[str, str | bool | None]:
+        return {
+            "provider": self.PAYMENT_PROVIDER,
+            "merchant_id": self.PAYMENT_MERCHANT_ID,
+            "merchant_name": self.PAYMENT_MERCHANT_NAME,
+            "merchant_role": self.PAYMENT_MERCHANT_ROLE,
+            "merchant_status": self.PAYMENT_MERCHANT_STATUS,
+            "public_key": self.PAYMENT_PUBLIC_KEY,
+            "callback_url": self.PAYMENT_CALLBACK_URL,
+            "return_url": self.PAYMENT_RETURN_URL,
+            "bank_account": self.PAYMENT_BANK_ACCOUNT,
+            "bank_ifsc": self.PAYMENT_BANK_IFSC,
+            "bank_branch": self.PAYMENT_BANK_BRANCH,
+            "demo_mode": self.PAYMENT_PROVIDER == "demo",
+        }
 
     @property
     def admin_username(self) -> str:
@@ -141,6 +198,14 @@ class Settings(BaseSettings):
     @property
     def r2_public_url(self) -> str | None:
         return self.R2_PUBLIC_URL
+
+    def hostel_fee(self, hostel_name: str) -> int:
+        normalized = hostel_name.strip().lower()
+        if normalized == "vaidehi hostel":
+            return self.VAIDEHI_HOSTEL_FEE
+        if normalized == "mahima hostel":
+            return self.MAHIMA_HOSTEL_FEE
+        raise ValueError("Invalid hostel name.")
 
 
 @lru_cache

@@ -1,4 +1,4 @@
-# MMC Backend
+# Magadh Mahila College Hostel ERP Backend
 
 ## Run locally
 
@@ -10,6 +10,14 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+## Stack
+
+- FastAPI + SQLAlchemy
+- JWT auth for admin and student workspaces
+- MySQL-ready Railway deployment
+- PDF receipt generation with QR support
+- Hostel admission, renewal, payment, allocation, complaints, and reporting APIs
+
 ## Database
 
 `DATABASE_URL` supports:
@@ -18,7 +26,12 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `postgresql+psycopg2://...` for PostgreSQL
 - `mysql+pymysql://...` for MySQL
 
-See `.env.example` for upload, database, and admin settings.
+Railway MySQL can be configured with either:
+
+- `DATABASE_URL` / `MYSQL_URL`
+- or `MYSQLHOST`, `MYSQLPORT`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`
+
+See `.env.example` for upload, payment gateway, database, CORS, and admin settings.
 
 ## Default admin
 
@@ -27,20 +40,41 @@ See `.env.example` for upload, database, and admin settings.
 
 Change these with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 
-## Available endpoints
+## Core endpoints
 
+- `GET /api/health`
 - `POST /api/admin/login`
 - `GET /api/admin/me`
-- `GET /api/notices/categories`
-- `GET /api/notices`
-- `GET /api/notices/admin`
-- `GET /api/notices/admin/{id}`
-- `POST /api/notices/admin`
-- `PATCH /api/notices/admin/{id}`
-- `DELETE /api/notices/admin/{id}`
+- `POST /api/register`
+- `POST /api/login`
+- `POST /api/reset-password`
+- `GET /api/application`
+- `POST /api/application/draft`
+- `POST /api/application/submit`
+- `POST /api/application/start-renewal`
+- `GET /api/dashboard`
+- `POST /api/payment/application`
+- `POST /api/payment/hostel`
+- `GET /api/complaints`
+- `POST /api/complaints`
+- `GET /api/admin/dashboard`
+- `GET /api/admin/students`
+- `PATCH /api/admin/students/{student_id}/verify`
+- `PATCH /api/admin/students/{student_id}/shortlist`
+- `PATCH /api/admin/students/{student_id}/allocate-hostel`
+- `GET /api/admin/payments`
+- `POST /api/admin/approve-payment/{payment_id}`
+- `POST /api/admin/reject-payment/{payment_id}`
+- `GET /api/admin/complaints`
+- `PATCH /api/admin/complaints/{complaint_id}`
+- `GET /api/admin/hostel/rooms`
+- `POST /api/admin/hostel/rooms`
+- `PATCH /api/admin/hostel/rooms/{room_id}`
+- `GET /api/activity-logs`
 
 ## Notes
 
-- This backend now excludes the Hostel ERP codebase.
-- The standalone Hostel ERP backend lives in `hostel-erp-backend/`.
-- Notices and admin notice management routes remain available under `/api/notices`.
+- Startup seeds a default admin and a baseline room inventory for Vaidehi and Mahima hostels.
+- Receipts are generated into `uploads/receipts`.
+- Uploaded documents are stored under `uploads/photos`.
+- Frontend should point `VITE_ERP_API_BASE` to the deployed backend origin.
