@@ -17,6 +17,7 @@ from .migrations import (
 )
 from .routers.auth import router as auth_router
 from .routers.notices import router as notices_router
+from .routers.social_events import router as social_events_router
 from .seed_notices import sync_notice_folder_to_db
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,8 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router, prefix=settings.api_prefix)
     app.include_router(notices_router, prefix=settings.api_prefix)
+    app.include_router(social_events_router)
+    app.include_router(social_events_router, prefix=settings.api_prefix)
 
     return app
 

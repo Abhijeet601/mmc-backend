@@ -42,3 +42,25 @@ class NoticeResponse(BaseModel):
 class CategoryItem(BaseModel):
     value: NoticeCategory
     label: str
+
+
+class SocialEventCreate(BaseModel):
+    title: str = ""
+    description: str = ""
+    platform: str = ""
+    social_url: str
+    image_url: str = ""
+
+
+class SocialEventResponse(BaseModel):
+    id: int
+    title: str
+    description: str
+    platform: str
+    social_url: str
+    image_url: str | None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
