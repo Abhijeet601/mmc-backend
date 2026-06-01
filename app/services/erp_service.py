@@ -79,8 +79,6 @@ REQUIRED_SUBMISSION_FIELDS = [
     "session",
     "program",
     "preferred_hostel",
-    "room_type",
-    "food_preference",
 ]
 
 
