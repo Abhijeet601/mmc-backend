@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,7 +10,7 @@ from . import erp_models  # noqa: F401
 from .api.router import api_router
 from .auth import ensure_default_admin
 from .config import settings
-from .database import Base, SessionLocal, engine
+from .database import Base, SessionLocal, database_url, engine, test_connection
 from .middleware.rate_limit import RateLimitMiddleware
 from .migrations import (
     migrate_admin_users_username,
@@ -41,6 +42,70 @@ DEFAULT_HOSTEL_ROOMS = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_WAIT_RETRIES = 60
+_WAIT_INTERVAL = 2  # seconds
+
+
+def wait_for_db() -> None:
+    """Block until the database accepts a connection or retries are exhausted.
+
+    Key behaviours:
+    - Catches *all* exceptions (not just OperationalError) so transient
+      network errors, refused connections, and timeouts are all handled.
+    - Disposes the engine connection pool between attempts so SQLAlchemy
+      never reuses a cached failed connection.
+    - Logs the sanitised database URL on the first attempt so the target
+      host/port is visible in the deployment logs.
+    - Raises RuntimeError after all retries are exhausted so the process
+      exits with a non-zero code and Railway restarts it.
+    """
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Cannot start the application without a database connection."
+        )
+
+    try:
+        from sqlalchemy.engine.url import make_url as _make_url
+        _safe_url = _make_url(database_url).render_as_string(hide_password=True)
+    except Exception:
+        _safe_url = "<unparseable URL>"
+
+    logger.info(
+        "Waiting for database to become available (up to %d attempts, %ds apart). URL: %s",
+        _WAIT_RETRIES,
+        _WAIT_INTERVAL,
+        _safe_url,
+    )
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _WAIT_RETRIES + 1):
+        try:
+            test_connection()
+            logger.info("Database is ready (attempt %d/%d).", attempt, _WAIT_RETRIES)
+            return
+        except Exception as exc:  # noqa: BLE001 — intentionally broad
+            last_exc = exc
+            logger.warning(
+                "Database not ready yet (attempt %d/%d): %s: %s",
+                attempt,
+                _WAIT_RETRIES,
+                type(exc).__name__,
+                exc,
+            )
+            # Dispose the pool so the next attempt opens a brand-new connection
+            # rather than reusing a cached, broken one.
+            try:
+                engine.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt < _WAIT_RETRIES:
+                time.sleep(_WAIT_INTERVAL)
+
+    raise RuntimeError(
+        f"Database did not become available after {_WAIT_RETRIES} attempts "
+        f"({_WAIT_RETRIES * _WAIT_INTERVAL}s). Last error: {last_exc}"
+    )
 
 
 def seed_default_hostel_rooms() -> None:
@@ -84,6 +149,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup_event() -> None:
+        wait_for_db()
         ensure_upload_directories()
         Base.metadata.create_all(bind=engine)
         migrate_admin_users_username(engine)
