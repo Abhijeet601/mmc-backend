@@ -1,13 +1,16 @@
+import logging
 import os
 import re
 
-from sqlalchemy import create_engine
-from sqlalchemy.exc import ArgumentError
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import ArgumentError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.engine import URL
 from sqlalchemy.engine.url import make_url
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 REFERENCE_PATTERN = re.compile(r"\$\{\{([^}]+)\}\}|\$\{([^}]+)\}|\{\{([^}]+)\}\}")
 
@@ -211,6 +214,8 @@ def validate_database_url(url: str) -> str:
 
 database_url = validate_database_url(normalize_database_url(_resolve_raw_database_url()))
 
+logger.info("Database URL resolved: %s", make_url(database_url).render_as_string(hide_password=True))
+
 connect_args: dict[str, bool] = {}
 if database_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
@@ -235,3 +240,15 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def test_connection() -> bool:
+    """Test the database connection. Call this explicitly (e.g. from wait_for_db),
+    never at module load time so that the DB has a chance to initialise first."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except OperationalError as exc:
+        logger.warning("Database connection test failed: %s", exc)
+        return False
