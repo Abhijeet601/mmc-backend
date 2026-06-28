@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,7 +10,7 @@ from . import erp_models  # noqa: F401
 from .api.router import api_router
 from .auth import ensure_default_admin
 from .config import settings
-from .database import Base, SessionLocal, engine
+from .database import Base, SessionLocal, engine, test_connection
 from .middleware.rate_limit import RateLimitMiddleware
 from .migrations import (
     migrate_admin_users_username,
@@ -41,6 +42,29 @@ DEFAULT_HOSTEL_ROOMS = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def wait_for_db(max_retries: int = 60, retry_delay: int = 2) -> None:
+    """Wait for database to be ready with retries."""
+    logger.info(f"Waiting for database (up to {max_retries} attempts, {retry_delay}s apart)...")
+    for attempt in range(1, max_retries + 1):
+        try:
+            if test_connection():
+                logger.info(f"Database is ready (attempt {attempt}/{max_retries})")
+                return
+        except Exception as e:
+            logger.warning(f"Database not ready (attempt {attempt}/{max_retries}): {e}")
+        
+        if attempt < max_retries:
+            time.sleep(retry_delay)
+        
+        # Dispose pool to clear any cached connections
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+    
+    raise RuntimeError(f"Database did not become available after {max_retries} attempts")
 
 
 def seed_default_hostel_rooms() -> None:
@@ -84,6 +108,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup_event() -> None:
+        # Wait for database to be ready FIRST
+        wait_for_db()
+        
         ensure_upload_directories()
         Base.metadata.create_all(bind=engine)
         migrate_admin_users_username(engine)
@@ -130,3 +157,4 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+

@@ -1,13 +1,16 @@
+import logging
 import os
 import re
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.engine import URL
 from sqlalchemy.engine.url import make_url
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 REFERENCE_PATTERN = re.compile(r"\$\{\{([^}]+)\}\}|\$\{([^}]+)\}|\{\{([^}]+)\}\}")
 
@@ -235,3 +238,15 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def test_connection() -> bool:
+    """Test the database connection. Returns True if successful, False otherwise."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.warning(f"Database connection test failed: {e}")
+        return False
+
