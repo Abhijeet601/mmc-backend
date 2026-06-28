@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -61,6 +62,26 @@ def seed_default_hostel_rooms() -> None:
         db.commit()
 
 
+def wait_for_database(max_retries: int = 30, retry_delay: int = 2) -> bool:
+    """Wait for database to be ready with retries."""
+    for attempt in range(max_retries):
+        try:
+            with engine.connect() as conn:
+                conn.execute("SELECT 1")
+            logger.info("Database connection successful")
+            return True
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Database not ready (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {retry_delay}s..."
+                )
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"Failed to connect to database after {max_retries} attempts: {e}")
+                raise
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Magadh Mahila College Hostel ERP",
@@ -85,6 +106,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def startup_event() -> None:
         ensure_upload_directories()
+        
+        # Wait for database to be ready before proceeding
+        wait_for_database()
+        
         Base.metadata.create_all(bind=engine)
         migrate_admin_users_username(engine)
         migrate_notices_publish_date(engine)
@@ -130,3 +155,4 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
