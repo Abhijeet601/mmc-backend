@@ -1,9 +1,12 @@
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from . import erp_models  # noqa: F401
 from .api.router import api_router
@@ -41,6 +44,28 @@ DEFAULT_HOSTEL_ROOMS = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def wait_for_db(retries: int = 30, delay: float = 2.0) -> None:
+    """Retry connecting to the database until it is ready or retries are exhausted."""
+    for attempt in range(1, retries + 1):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("Database is ready.")
+            return
+        except OperationalError as exc:
+            logger.warning(
+                "Database not ready (attempt %d/%d): %s. Retrying in %.0fs...",
+                attempt,
+                retries,
+                exc.args[0] if exc.args else exc,
+                delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError(
+        f"Database did not become ready after {retries} attempts ({retries * delay:.0f}s)."
+    )
 
 
 def seed_default_hostel_rooms() -> None:
@@ -84,6 +109,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup_event() -> None:
+        wait_for_db()
         ensure_upload_directories()
         Base.metadata.create_all(bind=engine)
         migrate_admin_users_username(engine)
