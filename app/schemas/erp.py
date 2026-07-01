@@ -33,6 +33,7 @@ class StudentLoginResponse(BaseModel):
     application_completed: bool
     redirect: str
     application_number: str
+    student_id: int | None = None
     student_name: str | None = None
 
 
@@ -296,8 +297,12 @@ class HostelRoomSummary(BaseModel):
     block_name: str
     room_number: str
     bed_capacity: int
+    total_beds: int = 3
     occupied_beds: int
     available_beds: int
+    occupied_bed_labels: list[str] = []
+    available_bed_labels: list[str] = []
+    occupancy_status: str = "available"
     is_active: bool
     notes: str | None = None
 

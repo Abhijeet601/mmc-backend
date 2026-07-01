@@ -13,6 +13,7 @@ from .database import Base, SessionLocal, engine
 from .middleware.rate_limit import RateLimitMiddleware
 from .migrations import (
     migrate_admin_users_username,
+    migrate_hostel_room_beds,
     migrate_notices_is_active,
     migrate_notices_publish_date,
     migrate_notices_publish_to_values,
@@ -32,12 +33,12 @@ DEFAULT_HOSTEL_ROOMS = [
     ("Vaidehi Hostel", "B", "201", 3),
     ("Vaidehi Hostel", "B", "202", 3),
     ("Vaidehi Hostel", "B", "203", 3),
-    ("Mahima Hostel", "A", "101", 2),
-    ("Mahima Hostel", "A", "102", 2),
-    ("Mahima Hostel", "A", "103", 2),
-    ("Mahima Hostel", "B", "201", 2),
-    ("Mahima Hostel", "B", "202", 2),
-    ("Mahima Hostel", "B", "203", 2),
+    ("Mahima Hostel", "A", "101", 3),
+    ("Mahima Hostel", "A", "102", 3),
+    ("Mahima Hostel", "A", "103", 3),
+    ("Mahima Hostel", "B", "201", 3),
+    ("Mahima Hostel", "B", "202", 3),
+    ("Mahima Hostel", "B", "203", 3),
 ]
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
         migrate_notices_publish_date(engine)
         migrate_notices_is_active(engine)
         migrate_notices_publish_to_values(engine)
+        migrate_hostel_room_beds(engine)
         seed_default_hostel_rooms()
         
         logger.info("Running password migration check on startup...")

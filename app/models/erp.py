@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -113,6 +113,9 @@ class ERPHostelRoom(Base):
 
 class ERPApplication(Base):
     __tablename__ = "hostel_applications"
+    __table_args__ = (
+        UniqueConstraint("allocated_room_id", "bed_number", name="uq_hostel_application_room_bed"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     student_id: Mapped[int] = mapped_column(

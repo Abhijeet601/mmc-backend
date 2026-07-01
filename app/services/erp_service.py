@@ -11,6 +11,7 @@ from ..config import settings
 from ..erp_models import ERPApplication, ERPApplicationPayment, ERPHostelPayment, ERPHostelRoom, ERPStudent
 
 VALID_HOSTELS = {"Vaidehi Hostel", "Mahima Hostel"}
+ROOM_BED_LABELS = ("A", "B", "C")
 PAYMENT_STATUS_PENDING = "pending"
 PAYMENT_STATUS_SUCCESS = "success"
 PAYMENT_STATUS_FAILED = "failed"
@@ -78,7 +79,6 @@ REQUIRED_SUBMISSION_FIELDS = [
     "honours_subject",
     "session",
     "program",
-    "preferred_hostel",
 ]
 
 
@@ -132,7 +132,13 @@ def normalize_bed_number(value: object | None) -> str | None:
     normalized = clean_text(value)
     if not normalized:
         return None
-    return normalized.upper().replace("BED ", "B")
+    normalized = normalized.upper().replace("BED ", "").replace("BED-", "").strip()
+    legacy_map = {"B1": "A", "B2": "B", "B3": "C", "1": "A", "2": "B", "3": "C"}
+    return legacy_map.get(normalized, normalized)
+
+
+def valid_bed_labels() -> tuple[str, ...]:
+    return ROOM_BED_LABELS
 
 
 def payment_reference(payment_type: str, payment_id: int) -> str:
@@ -511,8 +517,71 @@ def student_notifications(student: ERPStudent, application: ERPApplication | Non
     return notifications
 
 
+def room_occupied_bed_labels(
+    db: Session,
+    room: ERPHostelRoom,
+    *,
+    exclude_student_id: int | None = None,
+    exclude_old_student_id: int | None = None,
+) -> set[str]:
+    occupied: set[str] = set()
+    for application in room.applications:
+        if (
+            application.allocated_hostel
+            and application.allocated_room_id == room.id
+            and application.student_id != exclude_student_id
+        ):
+            bed = normalize_bed_number(application.bed_number)
+            if bed:
+                occupied.add(bed)
+
+    old_students = db.scalars(
+        select(ERPStudent).where(
+            ERPStudent.is_old_student == True,
+            ERPStudent.hostel_name == room.hostel_name,
+            ERPStudent.block_name == room.block_name,
+            ERPStudent.room_number == room.room_number,
+            ERPStudent.id != exclude_old_student_id,
+        )
+    )
+    for student in old_students:
+        bed = normalize_bed_number(student.bed_number)
+        if bed:
+            occupied.add(bed)
+
+    return occupied
+
+
+def room_available_bed_labels(
+    db: Session,
+    room: ERPHostelRoom,
+    *,
+    include_bed: str | None = None,
+    exclude_student_id: int | None = None,
+    exclude_old_student_id: int | None = None,
+) -> list[str]:
+    occupied = room_occupied_bed_labels(
+        db,
+        room,
+        exclude_student_id=exclude_student_id,
+        exclude_old_student_id=exclude_old_student_id,
+    )
+    current_bed = normalize_bed_number(include_bed)
+    return [
+        bed
+        for bed in ROOM_BED_LABELS
+        if bed not in occupied or (current_bed and bed == current_bed)
+    ]
+
+
 def room_occupied_beds(room: ERPHostelRoom) -> int:
-    return sum(1 for application in room.applications if application.allocated_hostel and application.allocated_room_id == room.id)
+    return len(
+        {
+            normalize_bed_number(application.bed_number)
+            for application in room.applications
+            if application.allocated_hostel and application.allocated_room_id == room.id and application.bed_number
+        }
+    )
 
 
 def room_total_occupied_beds(
@@ -522,23 +591,14 @@ def room_total_occupied_beds(
     exclude_student_id: int | None = None,
     exclude_old_student_id: int | None = None,
 ) -> int:
-    application_occupancy = sum(
-        1
-        for application in room.applications
-        if application.allocated_hostel
-        and application.allocated_room_id == room.id
-        and application.student_id != exclude_student_id
-    )
-    old_student_occupancy = db.scalar(
-        select(func.count(ERPStudent.id)).where(
-            ERPStudent.is_old_student == True,
-            ERPStudent.hostel_name == room.hostel_name,
-            ERPStudent.block_name == room.block_name,
-            ERPStudent.room_number == room.room_number,
-            ERPStudent.id != exclude_old_student_id,
+    return len(
+        room_occupied_bed_labels(
+            db,
+            room,
+            exclude_student_id=exclude_student_id,
+            exclude_old_student_id=exclude_old_student_id,
         )
     )
-    return application_occupancy + (old_student_occupancy or 0)
 
 
 def refresh_room_occupancy(db: Session, room: ERPHostelRoom) -> int:
@@ -552,17 +612,32 @@ def update_room_occupancy(db: Session, room: ERPHostelRoom):
     db.commit()
 
 
-def build_room_summary(room: ERPHostelRoom) -> dict[str, object]:
+def build_room_summary(room: ERPHostelRoom, db: Session | None = None) -> dict[str, object]:
     occupied_beds = room.occupied_beds or 0
-    available_beds = max(room.bed_capacity - occupied_beds, 0)
+    total_beds = len(ROOM_BED_LABELS)
+    available_beds = max(total_beds - occupied_beds, 0)
+    occupied_source = room_occupied_bed_labels(db, room) if db is not None else {
+        normalize_bed_number(application.bed_number)
+        for application in room.applications
+        if application.allocated_hostel and application.allocated_room_id == room.id and normalize_bed_number(application.bed_number)
+    }
+    occupied_labels = sorted(
+        {bed for bed in occupied_source if bed in ROOM_BED_LABELS},
+        key=lambda bed: ROOM_BED_LABELS.index(bed),
+    )
+    available_labels = [bed for bed in ROOM_BED_LABELS if bed not in occupied_labels]
     return {
         "id": room.id,
         "hostel_name": room.hostel_name,
         "block_name": room.block_name,
         "room_number": room.room_number,
-        "bed_capacity": room.bed_capacity,
+        "bed_capacity": total_beds,
+        "total_beds": total_beds,
         "occupied_beds": occupied_beds,
         "available_beds": available_beds,
+        "occupied_bed_labels": occupied_labels,
+        "available_bed_labels": available_labels,
+        "occupancy_status": "full" if available_beds == 0 else "available",
         "is_active": room.is_active,
         "notes": room.notes,
     }

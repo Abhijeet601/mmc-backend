@@ -174,6 +174,59 @@ def migrate_notices_publish_to_values(engine: Engine) -> None:
         )
 
 
+def migrate_hostel_room_beds(engine: Engine) -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "hostel_rooms" not in tables:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE hostel_rooms SET bed_capacity = 3 WHERE bed_capacity IS NULL OR bed_capacity <> 3"))
+
+    if "hostel_applications" in tables:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE hostel_applications SET bed_number = CASE "
+                    "WHEN UPPER(TRIM(bed_number)) IN ('B1', '1', 'BED A', 'BED 1') THEN 'A' "
+                    "WHEN UPPER(TRIM(bed_number)) IN ('B2', '2', 'BED B', 'BED 2') THEN 'B' "
+                    "WHEN UPPER(TRIM(bed_number)) IN ('B3', '3', 'BED C', 'BED 3') THEN 'C' "
+                    "ELSE UPPER(REPLACE(REPLACE(TRIM(bed_number), 'Bed ', ''), 'BED ', '')) END "
+                    "WHERE bed_number IS NOT NULL"
+                )
+            )
+            duplicates = connection.execute(
+                text(
+                    "SELECT allocated_room_id, bed_number, COUNT(*) AS count "
+                    "FROM hostel_applications "
+                    "WHERE allocated_room_id IS NOT NULL AND bed_number IS NOT NULL "
+                    "GROUP BY allocated_room_id, bed_number HAVING COUNT(*) > 1"
+                )
+            ).mappings().all()
+            if duplicates:
+                logger.warning("Duplicate room-bed allocations exist; unique room-bed index was not created.")
+            else:
+                try:
+                    connection.execute(
+                        text("CREATE UNIQUE INDEX uq_hostel_application_room_bed ON hostel_applications (allocated_room_id, bed_number)")
+                    )
+                except Exception:
+                    logger.info("Unique room-bed index already exists or could not be created.", exc_info=True)
+
+    if "hostel_students" in tables:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE hostel_students SET bed_number = CASE "
+                    "WHEN UPPER(TRIM(bed_number)) IN ('B1', '1', 'BED A', 'BED 1') THEN 'A' "
+                    "WHEN UPPER(TRIM(bed_number)) IN ('B2', '2', 'BED B', 'BED 2') THEN 'B' "
+                    "WHEN UPPER(TRIM(bed_number)) IN ('B3', '3', 'BED C', 'BED 3') THEN 'C' "
+                    "ELSE UPPER(REPLACE(REPLACE(TRIM(bed_number), 'Bed ', ''), 'BED ', '')) END "
+                    "WHERE bed_number IS NOT NULL"
+                )
+            )
+
+
 def is_valid_bcrypt_hash(password_hash: str) -> bool:
     """Check if the password hash is a valid bcrypt hash."""
     if not password_hash:

@@ -46,6 +46,7 @@ from ..services.erp_service import (
     ensure_valid_hostel_name,
     hostel_status,
     normalize_bed_number,
+    room_available_bed_labels,
     refresh_room_occupancy,
     room_total_occupied_beds,
     payment_reference,
@@ -53,6 +54,7 @@ from ..services.erp_service import (
     shortlist_status,
     utc_now,
     verification_status,
+    valid_bed_labels,
 )
 from ..services.payment_service import approve_application_payment, approve_hostel_payment, reject_payment
 
@@ -162,20 +164,13 @@ def _occupied_room_beds(db: Session, room: ERPHostelRoom, *, ignore_student_id: 
 
 
 def _next_available_bed(db: Session, room: ERPHostelRoom, *, ignore_student_id: int | None = None) -> str | None:
-    used_beds = _occupied_room_beds(db, room, ignore_student_id=ignore_student_id)
-    for index in range(1, room.bed_capacity + 1):
-        candidate = f"B{index}"
-        if candidate not in used_beds:
-            return candidate
-    return None
+    return next(iter(room_available_bed_labels(db, room, exclude_student_id=ignore_student_id)), None)
 
 
 def _validate_bed_number(room: ERPHostelRoom, bed_number: str) -> str:
     normalized = normalize_bed_number(bed_number)
-    if not normalized or not normalized.startswith("B") or not normalized[1:].isdigit():
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Bed number must be in B1/B2 format.")
-    if int(normalized[1:]) > room.bed_capacity:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Bed number exceeds room capacity.")
+    if normalized not in valid_bed_labels():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Bed must be A, B, or C.")
     return normalized
 
 
@@ -549,20 +544,19 @@ def allocate_hostel(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Selected room is inactive.")
 
         refresh_room_occupancy(db, room)
-        occupied_beds = room_total_occupied_beds(db, room, exclude_student_id=student.id)
-        currently_assigned_here = student.application.allocated_room_id == room.id
-        if occupied_beds >= room.bed_capacity and not currently_assigned_here:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Selected room is already full.")
-
-        bed_number = (
-            _validate_bed_number(room, payload.bed_number)
-            if payload.bed_number
-            else _next_available_bed(db, room, ignore_student_id=student.id)
+        available_beds = room_available_bed_labels(
+            db,
+            room,
+            include_bed=student.application.bed_number if student.application.allocated_room_id == room.id else None,
+            exclude_student_id=student.id,
         )
-        if not bed_number:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No bed is available in the selected room.")
+        if not available_beds:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Room is Full.")
+        if not payload.bed_number:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Select an available bed.")
 
-        if bed_number in _occupied_room_beds(db, room, ignore_student_id=student.id):
+        bed_number = _validate_bed_number(room, payload.bed_number)
+        if bed_number not in available_beds:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Selected bed is already occupied.")
 
         student.application.allocated_hostel = room.hostel_name
@@ -576,7 +570,7 @@ def allocate_hostel(
             )
         student.application.allocated_hostel = ensure_valid_hostel_name(payload.hostel_name)
         student.application.allocated_room_id = None
-        student.application.bed_number = normalize_bed_number(payload.bed_number)
+        student.application.bed_number = None
 
     student.application.hostel_allocated_at = utc_now()
     db.add(student.application)

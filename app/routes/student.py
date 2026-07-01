@@ -79,6 +79,11 @@ def _find_student_by_identifier(db: Session, identifier: str) -> ERPStudent | No
     normalized_identifier = _normalize_login_identifier(identifier)
     if "@" in normalized_identifier:
         return db.scalar(select(ERPStudent).where(ERPStudent.email == _normalize_email(normalized_identifier)))
+    normalized_mobile = _normalize_mobile_number(normalized_identifier)
+    if normalized_mobile.isdigit() and len(normalized_mobile) >= 10:
+        student = db.scalar(select(ERPStudent).where(ERPStudent.mobile_number == normalized_mobile))
+        if student:
+            return student
     return db.scalar(select(ERPStudent).where(ERPStudent.application_number == normalized_identifier))
 
 
@@ -291,6 +296,7 @@ def login_student(payload: StudentLoginRequest, db: Session = Depends(get_db)) -
         application_completed=application_completed,
         redirect="/dashboard" if application_completed else "/application-form",
         application_number=student.application_number,
+        student_id=student.id,
         student_name=student.application.name if student.application else None,
     )
 
