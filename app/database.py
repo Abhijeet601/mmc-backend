@@ -1,13 +1,16 @@
+import logging
 import os
 import re
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.engine import URL
 from sqlalchemy.engine.url import make_url
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 REFERENCE_PATTERN = re.compile(r"\$\{\{([^}]+)\}\}|\$\{([^}]+)\}|\{\{([^}]+)\}\}")
 
@@ -211,6 +214,14 @@ def validate_database_url(url: str) -> str:
 
 database_url = validate_database_url(normalize_database_url(_resolve_raw_database_url()))
 
+# Log the resolved URL (password redacted) so startup issues are visible in logs.
+try:
+    _parsed_url = make_url(database_url)
+    _safe_url = _parsed_url.render_as_string(hide_password=True)
+except Exception:
+    _safe_url = "<unparseable URL>"
+logger.info("Resolved database URL: %s", _safe_url)
+
 connect_args: dict[str, bool] = {}
 if database_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
@@ -223,6 +234,21 @@ SessionLocal = sessionmaker(
     autocommit=False,
     future=True,
 )
+
+
+def test_connection() -> None:
+    """Open a single raw connection, run SELECT 1, then close it immediately.
+
+    Raises whatever exception SQLAlchemy / PyMySQL surfaces so the caller can
+    decide whether to retry.  The engine connection pool is disposed after each
+    failed attempt so stale/cached connections never mask the real state of the
+    database.
+    """
+    conn = engine.connect()
+    try:
+        conn.execute(text("SELECT 1"))
+    finally:
+        conn.close()
 
 
 class Base(DeclarativeBase):
