@@ -90,9 +90,15 @@ def create_app() -> FastAPI:
             path = request.url.path.rstrip("/")
             erp_prefixes = (
                 "/erp", "/admin-login", "/system-admin", "/application-form", "/dashboard",
-                "/api/student", "/api/admin", "/api/payment", "/api/activity-logs",
+                "/api/student", "/api/payment", "/api/activity-logs",
             )
             if any(path == prefix or path.startswith(f"{prefix}/") for prefix in erp_prefixes):
+                return JSONResponse(status_code=404, content={"detail": "Hostel ERP is temporarily unavailable."})
+            # Notices use the shared admin authentication endpoints. Keep only
+            # those endpoints available; all other /api/admin routes belong to
+            # the temporarily disabled Hostel ERP workspace.
+            notice_auth_paths = {"/api/admin/login", "/api/admin/me"}
+            if path.startswith("/api/admin/") and path not in notice_auth_paths:
                 return JSONResponse(status_code=404, content={"detail": "Hostel ERP is temporarily unavailable."})
         return await call_next(request)
 
