@@ -31,6 +31,21 @@ Railway MySQL can be configured with either:
 - `DATABASE_URL` / `MYSQL_URL`
 - or `MYSQLHOST`, `MYSQLPORT`, `MYSQLUSER`, `MYSQLPASSWORD`, `MYSQLDATABASE`
 
+For the Notifications backend, add these variables to the Railway web service
+(do not commit their values):
+
+```env
+MYSQLHOST=<Railway MySQL host>
+MYSQLPORT=<Railway MySQL port>
+MYSQLUSER=<Railway MySQL user>
+MYSQLPASSWORD=<Railway MySQL password>
+MYSQLDATABASE=<Railway MySQL database>
+```
+
+Railway may also inject `MYSQL_URL`/`MYSQL_PUBLIC_URL`; those are preferred
+automatically. The notification CRUD endpoints under `/api/notices` use this
+same configured database and existing migrations/table checks.
+
 See `.env.example` for upload, payment gateway, database, CORS, and admin settings.
 
 ## Default admin
