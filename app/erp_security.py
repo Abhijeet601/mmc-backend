@@ -18,12 +18,34 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
-    return pwd_context.verify(plain_password, password_hash)
+    try:
+        return pwd_context.verify(plain_password, password_hash)
+    except Exception:
+        return False
 
 
 def generate_random_password(length: int = 10) -> str:
-    alphabet = string.ascii_letters + string.digits + "@#$"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+    alphabet = string.ascii_letters + string.digits + "@#$!%*?"
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(max(length, 10)))
+        if validate_password_strength(password) is None:
+            return password
+
+
+def validate_password_strength(password: str, confirm_password: str | None = None) -> str | None:
+    if confirm_password is not None and password != confirm_password:
+        return "New password and confirm password do not match."
+    if len(password or "") < 8:
+        return "Password must be at least 8 characters long."
+    if not any(char.isupper() for char in password):
+        return "Password must include at least one uppercase letter."
+    if not any(char.islower() for char in password):
+        return "Password must include at least one lowercase letter."
+    if not any(char.isdigit() for char in password):
+        return "Password must include at least one number."
+    if not any(char in string.punctuation for char in password):
+        return "Password must include at least one special character."
+    return None
 
 
 def create_access_token(subject: str, role: str, expires_delta: timedelta | None = None) -> str:

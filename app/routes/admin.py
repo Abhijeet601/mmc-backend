@@ -2,21 +2,26 @@ from __future__ import annotations
 
 from collections import Counter
 from io import BytesIO
+import json
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from ..database import get_db
 from ..dependencies import get_current_admin
+from ..erp_security import generate_random_password, hash_password, validate_password_strength
 from ..erp_models import ActivityLog, ERPApplication, ERPApplicationPayment, ERPComplaint, ERPHostelPayment, ERPHostelRoom, ERPStudent
 from ..erp_schemas import (
+    AdminStudentAccountResponse,
+    AdminStudentAccountUpdateRequest,
     AdminAllocationRequest,
     AdminDashboardResponse,
     AdminHostelRoomPayload,
     AdminPaymentListResponse,
+    AdminStudentPasswordResetRequest,
     AdminStudentDetailResponse,
     AdminShortlistRequest,
     AdminStudentListResponse,
@@ -31,6 +36,7 @@ from ..erp_schemas import (
     HostelRoomListResponse,
     HostelRoomSummary,
 )
+from ..services.email_service import send_account_email
 from ..services.erp_service import (
     PAYMENT_STATUS_FAILED,
     PAYMENT_STATUS_PENDING,
@@ -50,6 +56,7 @@ from ..services.erp_service import (
     refresh_room_occupancy,
     room_total_occupied_beds,
     payment_reference,
+    student_payment_status,
     update_room_occupancy,
     shortlist_status,
     utc_now,
@@ -61,8 +68,11 @@ from ..services.payment_service import approve_application_payment, approve_host
 router = APIRouter(prefix="/admin", tags=["erp-admin"])
 
 
-def _students_base_query():
-    return select(ERPStudent).options(
+def _students_base_query(*, include_inactive: bool = False):
+    query = select(ERPStudent)
+    if not include_inactive:
+        query = query.where(ERPStudent.is_active.is_(True))
+    return query.options(
         selectinload(ERPStudent.application).selectinload(ERPApplication.application_payments),
         selectinload(ERPStudent.application).selectinload(ERPApplication.hostel_payments),
         selectinload(ERPStudent.application).selectinload(ERPApplication.allocated_room),
@@ -74,6 +84,80 @@ def _get_student_with_application(student_id: int, db: Session) -> ERPStudent:
     if not student or not student.application:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student application not found.")
     return student
+
+
+def _get_student_account_or_404(student_id: int, db: Session) -> ERPStudent:
+    student = db.scalar(_students_base_query(include_inactive=True).where(ERPStudent.id == student_id))
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student record not found.")
+    return student
+
+
+def _normalize_email(value: str | None) -> str | None:
+    normalized = clean_text(value)
+    return normalized.lower() if normalized else None
+
+
+def _normalize_mobile(value: str | None) -> str | None:
+    normalized = clean_text(value)
+    if not normalized:
+        return None
+    digits = "".join(char for char in normalized if char.isdigit())
+    return digits or normalized
+
+
+def _normalize_aadhaar(value: str | None) -> str | None:
+    normalized = clean_text(value)
+    if not normalized:
+        return None
+    digits = "".join(char for char in normalized if char.isdigit())
+    return digits or normalized
+
+
+def _log_student_account_change(
+    db: Session,
+    *,
+    student_id: int,
+    action: str,
+    admin_id: int | None,
+    old_values: dict[str, object | None] | None = None,
+    new_values: dict[str, object | None] | None = None,
+) -> None:
+    db.add(
+        ActivityLog(
+            entity_type="student",
+            entity_id=str(student_id),
+            action=action,
+            old_values=json.dumps(old_values or {}, default=str),
+            new_values=json.dumps(new_values or {}, default=str),
+            admin_id=admin_id,
+        )
+    )
+
+
+def _ensure_unique_student_account_fields(
+    db: Session,
+    *,
+    student: ERPStudent,
+    application_number: str | None,
+    email: str | None,
+    mobile_number: str | None,
+) -> None:
+    checks = []
+    if application_number and application_number != student.application_number:
+        checks.append(ERPStudent.application_number == application_number)
+    if email and email != student.email:
+        checks.append(ERPStudent.email == email)
+    if mobile_number and mobile_number != student.mobile_number:
+        checks.append(ERPStudent.mobile_number == mobile_number)
+    if not checks:
+        return
+    existing = db.scalar(select(ERPStudent).where(or_(*checks), ERPStudent.id != student.id))
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Student ID, email, or mobile number is already used by another student.",
+        )
 
 
 def _payments_base_query():
@@ -99,6 +183,10 @@ def _build_payment_summary(payment_type: str, payment: ERPApplicationPayment | E
         status=payment.status,
         payment_mode=payment.payment_mode,
         transaction_id=payment.transaction_id,
+        order_id=payment.order_id,
+        tracking_id=payment.tracking_id,
+        payment_status=payment.payment_status,
+        receipt_number=payment.receipt_number,
         amount=float(payment.amount),
         payment_date=payment.payment_date,
         receipt_url=build_asset_url(payment.receipt_path),
@@ -225,6 +313,7 @@ def _filter_students_by_query(
     shortlist: str | None = None,
     verified: str | None = None,
     hostel_state: str | None = None,
+    payment_status: str | None = None,
 ) -> list[ERPStudent]:
     search_term = clean_text(search)
     filtered: list[ERPStudent] = []
@@ -262,6 +351,8 @@ def _filter_students_by_query(
         if verified and verification_status(app) != verified:
             continue
         if hostel_state and hostel_status(app) != hostel_state:
+            continue
+        if payment_status and student_payment_status(app) != payment_status:
             continue
         filtered.append(student)
 
@@ -349,12 +440,13 @@ def list_students(
     shortlist: str | None = Query(default=None),
     verified: str | None = Query(default=None),
     hostel_state: str | None = Query(default=None),
+    payment_status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     _=Depends(get_current_admin),
 ) -> AdminStudentListResponse:
-    students = list(db.scalars(_students_base_query()))
+    students = list(db.scalars(_students_base_query(include_inactive=True)))
     filtered = _filter_students_by_query(
         students,
         search=search,
@@ -365,6 +457,7 @@ def list_students(
         shortlist=shortlist,
         verified=verified,
         hostel_state=hostel_state,
+        payment_status=payment_status,
     )
     total = len(filtered)
     page = filtered[offset : offset + limit]
@@ -380,6 +473,145 @@ def get_student_detail(
 ) -> AdminStudentDetailResponse:
     student = _get_student_with_application(student_id, db)
     return AdminStudentDetailResponse(**build_admin_student_detail(student))
+
+
+@router.patch("/students/{student_id}/account", response_model=AdminStudentAccountResponse)
+def update_student_account(
+    student_id: int,
+    payload: AdminStudentAccountUpdateRequest,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin),
+) -> AdminStudentAccountResponse:
+    student = _get_student_account_or_404(student_id, db)
+    application = student.application
+    application_number = clean_text(payload.application_number)
+    email = _normalize_email(payload.email)
+    mobile_number = _normalize_mobile(payload.mobile_number)
+    aadhaar_number = _normalize_aadhaar(payload.aadhaar_number)
+
+    if application_number is not None and len(application_number) < 3:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Student ID must be at least 3 characters.")
+    if email is not None and "@" not in email:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Enter a valid login email.")
+    if mobile_number is not None and (not mobile_number.isdigit() or len(mobile_number) != 10):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Mobile number must be 10 digits.")
+    if aadhaar_number is not None and (not aadhaar_number.isdigit() or len(aadhaar_number) != 12):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Aadhaar number must be 12 digits.")
+
+    _ensure_unique_student_account_fields(
+        db,
+        student=student,
+        application_number=application_number,
+        email=email,
+        mobile_number=mobile_number,
+    )
+
+    old_values = {
+        "application_number": student.application_number,
+        "email": student.email,
+        "mobile_number": student.mobile_number,
+        "is_active": student.is_active,
+        "force_password_change": student.force_password_change,
+        "name": application.name if application else None,
+        "aadhaar_number": application.aadhaar_number if application else None,
+        "course_name": application.course_name if application else None,
+        "session": application.session if application else None,
+        "program": application.program if application else None,
+        "roll_number": application.roll_number if application else None,
+    }
+
+    if application_number is not None:
+        student.application_number = application_number
+    if email is not None:
+        student.email = email
+        if application:
+            application.email = email
+    if mobile_number is not None:
+        student.mobile_number = mobile_number
+        if application:
+            application.mobile_number = mobile_number
+    if payload.is_active is not None:
+        student.is_active = payload.is_active
+    if payload.force_password_change is not None:
+        student.force_password_change = payload.force_password_change
+
+    if application:
+        for field_name in ("name", "course_name", "session", "program", "roll_number"):
+            value = getattr(payload, field_name)
+            if value is not None:
+                setattr(application, field_name, clean_text(value))
+        if aadhaar_number is not None:
+            application.aadhaar_number = aadhaar_number
+        db.add(application)
+
+    new_values = {
+        "application_number": student.application_number,
+        "email": student.email,
+        "mobile_number": student.mobile_number,
+        "is_active": student.is_active,
+        "force_password_change": student.force_password_change,
+        "name": application.name if application else None,
+        "aadhaar_number": application.aadhaar_number if application else None,
+        "course_name": application.course_name if application else None,
+        "session": application.session if application else None,
+        "program": application.program if application else None,
+        "roll_number": application.roll_number if application else None,
+    }
+
+    db.add(student)
+    _log_student_account_change(
+        db,
+        student_id=student.id,
+        action="account_update",
+        old_values=old_values,
+        new_values=new_values,
+        admin_id=current_admin.id,
+    )
+    db.commit()
+    return AdminStudentAccountResponse(message="Account Updated Successfully")
+
+
+@router.post("/students/{student_id}/reset-password", response_model=AdminStudentAccountResponse)
+def admin_reset_student_password(
+    student_id: int,
+    payload: AdminStudentPasswordResetRequest,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin),
+) -> AdminStudentAccountResponse:
+    student = _get_student_account_or_404(student_id, db)
+    temporary_password = generate_random_password() if payload.generate_temporary or not payload.password else payload.password
+    password_error = validate_password_strength(temporary_password)
+    if password_error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=password_error)
+
+    student.password_hash = hash_password(temporary_password)
+    student.force_password_change = payload.force_password_change
+    student.reset_token_hash = None
+    student.reset_token_expires_at = None
+    student.reset_attempt_count = 0
+    student.reset_last_attempt_at = None
+    db.add(student)
+    _log_student_account_change(
+        db,
+        student_id=student.id,
+        action="admin_password_reset",
+        old_values={"force_password_change": not payload.force_password_change},
+        new_values={"force_password_change": student.force_password_change},
+        admin_id=current_admin.id,
+    )
+    email_status = None
+    if payload.send_email:
+        email_status = send_account_email(
+            recipient=student.email,
+            subject="Student password reset",
+            body=f"Your temporary password is {temporary_password}.",
+        )
+    db.commit()
+    return AdminStudentAccountResponse(
+        message="Password Reset Successfully",
+        temporary_password=temporary_password if payload.generate_temporary else None,
+        email_status=email_status,
+    )
 
 
 @router.get("/payments", response_model=AdminPaymentListResponse)
@@ -431,33 +663,10 @@ def approve_payment(
     db: Session = Depends(get_db),
     current_admin=Depends(get_current_admin),
 ) -> GenericMessageResponse:
-    payment_type, payment = _get_payment_or_404(payment_id, db)
-    if payment.status == PAYMENT_STATUS_SUCCESS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Payment is already approved.")
-    if payment.status == PAYMENT_STATUS_FAILED:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Rejected payments must be resubmitted by the student.")
-    if payment.status != PAYMENT_STATUS_PENDING:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only pending payments can be approved.")
-
-    if payment_type == "application":
-        email_status = approve_application_payment(student=payment.student, application=payment.application, payment=payment)
-        action = "approve_application_payment"
-    else:
-        email_status = approve_hostel_payment(student=payment.student, application=payment.application, payment=payment)
-        action = "approve_hostel_payment"
-
-    db.add(payment)
-    db.add(
-        ActivityLog(
-            entity_type="payment",
-            entity_id=payment_reference(payment_type, payment.id),
-            action=action,
-            new_values=f"{payment.transaction_id} / {payment.status} / email={email_status}",
-            admin_id=current_admin.id,
-        )
+    raise HTTPException(
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+        detail="Payments can only be approved by a verified CCAvenue callback.",
     )
-    db.commit()
-    return GenericMessageResponse(message="Payment approved successfully.")
 
 
 @router.post("/reject-payment/{payment_id}", response_model=GenericMessageResponse)
@@ -466,27 +675,10 @@ def reject_pending_payment(
     db: Session = Depends(get_db),
     current_admin=Depends(get_current_admin),
 ) -> GenericMessageResponse:
-    payment_type, payment = _get_payment_or_404(payment_id, db)
-    if payment.status == PAYMENT_STATUS_SUCCESS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved payments cannot be rejected.")
-    if payment.status == PAYMENT_STATUS_FAILED:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Payment is already rejected.")
-    if payment.status != PAYMENT_STATUS_PENDING:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only pending payments can be rejected.")
-
-    reject_payment(payment)
-    db.add(payment)
-    db.add(
-        ActivityLog(
-            entity_type="payment",
-            entity_id=payment_reference(payment_type, payment.id),
-            action="reject_payment",
-            new_values=f"{payment.transaction_id} / {payment.status}",
-            admin_id=current_admin.id,
-        )
+    raise HTTPException(
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+        detail="Gateway payments cannot be manually rejected.",
     )
-    db.commit()
-    return GenericMessageResponse(message="Payment rejected successfully.")
 
 
 @router.patch("/students/{student_id}/verify", response_model=GenericMessageResponse)
@@ -516,8 +708,13 @@ def shortlist_student(
     student = _get_student_with_application(student_id, db)
     student.application.is_shortlisted = payload.shortlisted
     student.application.shortlisted_at = utc_now() if payload.shortlisted else None
+    if payload.allotted_category:
+        student.application.allotted_category = payload.allotted_category.strip()[:20]
     if not payload.shortlisted:
         student.application.allocated_hostel = None
+        student.application.allocated_room_id = None
+        student.application.bed_number = None
+        student.application.allotted_category = None
         student.application.hostel_allocated_at = None
     db.add(student.application)
     db.commit()
@@ -603,9 +800,11 @@ def delete_student_application(
     if not student:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student record not found.")
 
-    db.delete(student)
+    student.is_active = False
+    student.password_hash = f"deleted:{student.id}:{utc_now().timestamp()}"
+    db.add(student)
     db.commit()
-    return GenericMessageResponse(message="Student record deleted successfully.")
+    return GenericMessageResponse(message="Student ID deleted successfully. Login access has been revoked.")
 
 
 @router.get("/hostel/rooms", response_model=HostelRoomListResponse)

@@ -35,6 +35,7 @@ class StudentLoginResponse(BaseModel):
     application_number: str
     student_id: int | None = None
     student_name: str | None = None
+    force_password_change: bool = False
 
 
 class StudentPasswordResetRequest(BaseModel):
@@ -42,6 +43,44 @@ class StudentPasswordResetRequest(BaseModel):
     date_of_birth: date
     mobile_number: str
     new_password: str
+
+
+class StudentForgotPasswordRequest(BaseModel):
+    email: str
+    aadhaar_number: str
+
+
+class StudentCompletePasswordResetRequest(BaseModel):
+    token: str
+    new_password: str
+    confirm_password: str
+
+
+class AdminStudentAccountUpdateRequest(BaseModel):
+    application_number: str | None = None
+    email: str | None = None
+    mobile_number: str | None = None
+    aadhaar_number: str | None = None
+    name: str | None = None
+    course_name: str | None = None
+    session: str | None = None
+    program: str | None = None
+    roll_number: str | None = None
+    is_active: bool | None = None
+    force_password_change: bool | None = None
+
+
+class AdminStudentPasswordResetRequest(BaseModel):
+    password: str | None = None
+    generate_temporary: bool = True
+    force_password_change: bool = True
+    send_email: bool = False
+
+
+class AdminStudentAccountResponse(BaseModel):
+    message: str
+    temporary_password: str | None = None
+    email_status: str | None = None
 
 
 class StatusTrackerStep(BaseModel):
@@ -78,7 +117,6 @@ class PaymentGatewayInfo(BaseModel):
     public_key: str | None = None
     callback_url: str | None = None
     return_url: str | None = None
-    demo_mode: bool = False
 
 
 class ApplicationFormPayload(BaseModel):
@@ -108,6 +146,7 @@ class StudentDashboardResponse(BaseModel):
     form_status: str
     verification_status: str
     application_payment_status: str
+    payment_status: str
     shortlist_status: str
     hostel_status: str
     shortlisted: bool
@@ -203,6 +242,7 @@ class ERPStudentSummary(BaseModel):
     form_status: str
     verification_status: str
     application_payment_status: str
+    payment_status: str
     shortlist_status: str
     hostel_status: str
     preferred_hostel: str | None = None
@@ -215,6 +255,9 @@ class ERPStudentSummary(BaseModel):
     verified_at: datetime | None = None
     shortlisted_at: datetime | None = None
     hostel_payment_date: datetime | None = None
+    account_active: bool = True
+    force_password_change: bool = False
+    aadhaar_number: str | None = None
 
 
 class AdminStudentListResponse(BaseModel):
@@ -261,6 +304,7 @@ class AdminVerifyRequest(BaseModel):
 
 class AdminShortlistRequest(BaseModel):
     shortlisted: bool = True
+    allotted_category: str | None = None
 
 
 class AdminAllocationRequest(BaseModel):
@@ -276,6 +320,10 @@ class AdminPaymentSummary(BaseModel):
     status: str
     payment_mode: str
     transaction_id: str
+    order_id: str | None = None
+    tracking_id: str | None = None
+    payment_status: str | None = None
+    receipt_number: str | None = None
     amount: float
     payment_date: datetime
     receipt_url: str | None = None

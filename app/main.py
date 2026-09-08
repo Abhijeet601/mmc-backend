@@ -3,6 +3,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import erp_models  # noqa: F401
@@ -17,6 +19,9 @@ from .migrations import (
     migrate_notices_is_active,
     migrate_notices_publish_date,
     migrate_notices_publish_to_values,
+    migrate_payment_gateway_columns,
+    migrate_student_account_security_columns,
+    purge_legacy_payment_records,
     migrate_plaintext_passwords,
 )
 from .models import AdminUser, Notice, SocialEvent  # noqa: F401
@@ -79,6 +84,18 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RateLimitMiddleware, limit=180, window_seconds=60)
 
+    @app.middleware("http")
+    async def block_disabled_hostel_erp(request: Request, call_next):
+        if not settings.HOSTEL_ERP_ENABLED:
+            path = request.url.path.rstrip("/")
+            erp_prefixes = (
+                "/erp", "/admin-login", "/system-admin", "/application-form", "/dashboard",
+                "/api/student", "/api/admin", "/api/payment", "/api/activity-logs",
+            )
+            if any(path == prefix or path.startswith(f"{prefix}/") for prefix in erp_prefixes):
+                return JSONResponse(status_code=404, content={"detail": "Hostel ERP is temporarily unavailable."})
+        return await call_next(request)
+
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
@@ -92,6 +109,9 @@ def create_app() -> FastAPI:
         migrate_notices_is_active(engine)
         migrate_notices_publish_to_values(engine)
         migrate_hostel_room_beds(engine)
+        migrate_payment_gateway_columns(engine)
+        migrate_student_account_security_columns(engine)
+        purge_legacy_payment_records(engine)
         seed_default_hostel_rooms()
         
         logger.info("Running password migration check on startup...")

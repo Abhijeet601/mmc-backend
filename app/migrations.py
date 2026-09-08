@@ -213,6 +213,127 @@ def migrate_hostel_room_beds(engine: Engine) -> None:
                 except Exception:
                     logger.info("Unique room-bed index already exists or could not be created.", exc_info=True)
 
+
+def migrate_payment_gateway_columns(engine: Engine) -> None:
+    column_definitions = {
+        "order_id": "VARCHAR(100)",
+        "tracking_id": "VARCHAR(100)",
+        "bank_ref_no": "VARCHAR(100)",
+        "payment_status": "VARCHAR(30)",
+        "currency": "VARCHAR(3) NOT NULL DEFAULT 'INR'",
+        "response_code": "VARCHAR(50)",
+        "response_message": "VARCHAR(500)",
+        "encrypted_request": "TEXT",
+        "encrypted_response": "TEXT",
+        "decrypted_response": "TEXT",
+        "transaction_date": "DATETIME",
+        "receipt_number": "VARCHAR(100)",
+    }
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    for table_name in ("hostel_application_payments", "hostel_hostel_payments"):
+        if table_name not in tables:
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        with engine.begin() as connection:
+            for column_name, definition in column_definitions.items():
+                if column_name not in columns:
+                    connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"))
+            connection.execute(
+                text(
+                    f"UPDATE {table_name} SET currency = 'INR' "
+                    "WHERE currency IS NULL OR TRIM(currency) = ''"
+                )
+            )
+
+        refreshed = inspect(engine)
+        indexes = {index["name"] for index in refreshed.get_indexes(table_name)}
+        with engine.begin() as connection:
+            for column_name in ("order_id", "tracking_id", "payment_status"):
+                index_name = f"ix_{table_name}_{column_name}"
+                if index_name not in indexes:
+                    connection.execute(text(f"CREATE INDEX {index_name} ON {table_name} ({column_name})"))
+
+
+def migrate_student_account_security_columns(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "hostel_students" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("hostel_students")}
+    column_definitions = {
+        "force_password_change": "BOOLEAN NOT NULL DEFAULT 0",
+        "reset_token_hash": "VARCHAR(255)",
+        "reset_token_expires_at": "DATETIME",
+        "reset_requested_at": "DATETIME",
+        "reset_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "reset_last_attempt_at": "DATETIME",
+    }
+
+    with engine.begin() as connection:
+        for column_name, definition in column_definitions.items():
+            if column_name not in columns:
+                connection.execute(text(f"ALTER TABLE hostel_students ADD COLUMN {column_name} {definition}"))
+
+    refreshed = inspect(engine)
+    indexes = {index["name"] for index in refreshed.get_indexes("hostel_students")}
+    if "ix_hostel_students_reset_token_hash" not in indexes:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE INDEX ix_hostel_students_reset_token_hash ON hostel_students (reset_token_hash)"))
+
+
+def purge_legacy_payment_records(engine: Engine) -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    for table_name in ("hostel_application_payments", "hostel_hostel_payments"):
+        if table_name not in tables:
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        demo_markers: list[str] = []
+        for column_name in (
+            "payment_mode",
+            "transaction_id",
+            "order_id",
+            "tracking_id",
+            "bank_ref_no",
+            "payment_status",
+            "response_message",
+            "receipt_number",
+            "receipt_path",
+            "encrypted_request",
+            "encrypted_response",
+            "decrypted_response",
+        ):
+            if column_name in columns:
+                demo_markers.append(f"UPPER(COALESCE({column_name}, '')) LIKE :demo_anywhere")
+        if not demo_markers:
+            continue
+        delete_where = " OR ".join(demo_markers)
+        with engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    f"DELETE FROM {table_name} "
+                    f"WHERE {delete_where} "
+                    "OR UPPER(COALESCE(transaction_id, '')) LIKE :application_pattern "
+                    "OR UPPER(COALESCE(transaction_id, '')) LIKE :hostel_pattern "
+                    "OR UPPER(COALESCE(transaction_id, '')) LIKE :registration_pattern "
+                    "OR UPPER(COALESCE(transaction_id, '')) LIKE :demo_prefix"
+                ),
+                {
+                    "demo_anywhere": "%DEMO%",
+                    "application_pattern": "APP-DEMO-%",
+                    "hostel_pattern": "HOSTEL-DEMO-%",
+                    "registration_pattern": "DEMO-REG-%",
+                    "demo_prefix": "DEMO-%",
+                },
+            )
+            if result.rowcount:
+                logger.warning(
+                    "Removed %s legacy demo payment records from %s so affected students can pay again.",
+                    result.rowcount,
+                    table_name,
+                )
+
     if "hostel_students" in tables:
         with engine.begin() as connection:
             connection.execute(

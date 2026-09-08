@@ -23,6 +23,9 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("APP_NAME", "PROJECT_NAME"),
     )
     API_PREFIX: str = "/api"
+    # Keep the ERP implementation deployed but allow operators to disable all
+    # student/admin hostel access during maintenance. Set to true to re-enable.
+    HOSTEL_ERP_ENABLED: bool = False
     ADMIN_PREFIX: str = "/admin"
     DATABASE_URL: str = "sqlite:///./mmc.db"
 
@@ -42,24 +45,16 @@ class Settings(BaseSettings):
     NOTICE_SOURCE_DIR: str = "../frontend/data files/Notice"
 
     APP_PAYMENT_AMOUNT: int = 1000
+    RENEWAL_PAYMENT_AMOUNT: int = 100
     VAIDEHI_HOSTEL_FEE: int = 10000
     MAHIMA_HOSTEL_FEE: int = 12000
-    DEMO_AUTO_APPROVE: bool = False
-    PAYMENT_PROVIDER: str = "demo"
-    PAYMENT_MERCHANT_ID: str | None = None
-    PAYMENT_MERCHANT_NAME: str | None = None
-    PAYMENT_MERCHANT_ROLE: str | None = None
-    PAYMENT_MERCHANT_STATUS: str | None = None
-    PAYMENT_LOGIN_PASSWORD: str | None = None
-    PAYMENT_TRANSACTION_PASSWORD: str | None = None
-    PAYMENT_PUBLIC_KEY: str | None = None
-    PAYMENT_SECRET_KEY: str | None = None
-    PAYMENT_CALLBACK_URL: str | None = None
-    PAYMENT_RETURN_URL: str | None = None
-    PAYMENT_WEBHOOK_SECRET: str | None = None
-    PAYMENT_BANK_ACCOUNT: str | None = None
-    PAYMENT_BANK_IFSC: str | None = None
-    PAYMENT_BANK_BRANCH: str | None = None
+    CCAVENUE_MERCHANT_ID: str | None = None
+    CCAVENUE_ACCESS_CODE: str | None = None
+    CCAVENUE_WORKING_KEY: str | None = None
+    CCAVENUE_GATEWAY_URL: str | None = None
+    CCAVENUE_REDIRECT_URL: str | None = None
+    CCAVENUE_CANCEL_URL: str | None = None
+    CCAVENUE_WEBHOOK_URL: str | None = None
 
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "admin123"
@@ -84,6 +79,7 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str | None = None
     SMTP_FROM_EMAIL: str | None = None
     SMTP_USE_TLS: bool = True
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 15
 
     AUTO_CREATE_TABLES: bool = True
 
@@ -149,18 +145,17 @@ class Settings(BaseSettings):
     @property
     def payment_provider_public_config(self) -> dict[str, str | bool | None]:
         return {
-            "provider": self.PAYMENT_PROVIDER,
-            "merchant_id": self.PAYMENT_MERCHANT_ID,
-            "merchant_name": self.PAYMENT_MERCHANT_NAME,
-            "merchant_role": self.PAYMENT_MERCHANT_ROLE,
-            "merchant_status": self.PAYMENT_MERCHANT_STATUS,
-            "public_key": self.PAYMENT_PUBLIC_KEY,
-            "callback_url": self.PAYMENT_CALLBACK_URL,
-            "return_url": self.PAYMENT_RETURN_URL,
-            "bank_account": self.PAYMENT_BANK_ACCOUNT,
-            "bank_ifsc": self.PAYMENT_BANK_IFSC,
-            "bank_branch": self.PAYMENT_BANK_BRANCH,
-            "demo_mode": self.PAYMENT_PROVIDER == "demo",
+            "provider": "ccavenue",
+            "configured": all(
+                (
+                    self.CCAVENUE_MERCHANT_ID,
+                    self.CCAVENUE_ACCESS_CODE,
+                    self.CCAVENUE_WORKING_KEY,
+                    self.CCAVENUE_GATEWAY_URL,
+                    self.CCAVENUE_REDIRECT_URL,
+                    self.CCAVENUE_CANCEL_URL,
+                )
+            ),
         }
 
     @property

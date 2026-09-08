@@ -24,6 +24,6 @@ def get_current_student(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid student token.")
 
     student = db.get(ERPStudent, int(subject))
-    if not student:
+    if not student or not student.is_active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found.")
     return student

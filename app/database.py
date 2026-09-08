@@ -154,10 +154,13 @@ def _present_mysql_env_keys() -> list[str]:
 def _resolve_raw_database_url() -> str:
     running_on_railway = _is_running_on_railway()
 
+    # Railway injects MYSQL_URL/MYSQL_PUBLIC_URL from the attached MySQL
+    # service. Prefer those over a stale DATABASE_URL left by an older
+    # deployment, while retaining DATABASE_URL support for other platforms.
     candidates = [
-        _clean_env_value(os.getenv("DATABASE_URL")),
         _clean_env_value(os.getenv("MYSQL_URL")),
         _clean_env_value(os.getenv("MYSQL_PUBLIC_URL")),
+        _clean_env_value(os.getenv("DATABASE_URL")),
     ]
 
     for candidate in candidates:

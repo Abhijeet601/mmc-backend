@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+import hashlib
+import secrets
+from datetime import date, timedelta, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,27 +13,27 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..erp_dependencies import get_current_student
-from ..erp_models import ERPApplication, ERPApplicationPayment, ERPComplaint, ERPHostelPayment, ERPStudent
-from ..erp_security import create_access_token, generate_random_password, hash_password, verify_password
+from ..erp_models import ActivityLog, ERPApplication, ERPApplicationPayment, ERPComplaint, ERPHostelPayment, ERPStudent
+from ..erp_security import create_access_token, generate_random_password, hash_password, validate_password_strength, verify_password
 from ..erp_schemas import (
     ApplicationFormPayload,
     ComplaintCreateRequest,
     ComplaintListResponse,
     ComplaintResponse,
     GenericMessageResponse,
-    PaymentResponse,
     StudentDashboardResponse,
+    StudentCompletePasswordResetRequest,
+    StudentForgotPasswordRequest,
     StudentLoginRequest,
     StudentLoginResponse,
     StudentPasswordResetRequest,
     StudentRegistrationRequest,
     StudentRegistrationResponse,
 )
+from ..services.email_service import send_account_email
 from ..services.application_number import generate_application_number
 from ..services.erp_service import (
     APPLICATION_FIELDS,
-    PAYMENT_MODE_DEMO,
-    PAYMENT_STATUS_PENDING,
     REQUIRED_SUBMISSION_FIELDS,
     application_summary,
     build_asset_url,
@@ -46,17 +48,13 @@ from ..services.erp_service import (
     next_renewal_cycle_reference,
     parse_optional_date,
     parse_optional_decimal,
-    payment_reference,
     utc_now,
 )
-from ..services.payment_service import approve_application_payment, approve_hostel_payment, transaction_exists
 from ..utils.file_storage import save_upload_file
 
 router = APIRouter(tags=["erp-student"])
 
-
-class PaymentRequest(BaseModel):
-    transaction_id: str | None = None
+_forgot_password_attempts: dict[str, list[float]] = {}
 
 
 class HostelPreferenceRequest(BaseModel):
@@ -73,6 +71,55 @@ def _normalize_login_identifier(value: str) -> str:
 
 def _normalize_mobile_number(value: str) -> str:
     return "".join(char for char in value if char.isdigit()) or value.strip()
+
+
+def _normalize_aadhaar_number(value: str | None) -> str:
+    if not value:
+        return ""
+    return "".join(char for char in value if char.isdigit()) or value.strip()
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _log_password_reset_event(
+    db: Session,
+    *,
+    student_id: int | None,
+    action: str,
+    old_values: dict[str, object | None] | None = None,
+    new_values: dict[str, object | None] | None = None,
+) -> None:
+    db.add(
+        ActivityLog(
+            entity_type="student",
+            entity_id=str(student_id or "unknown"),
+            action=action,
+            old_values=json_dumps(old_values or {}),
+            new_values=json_dumps(new_values or {}),
+        )
+    )
+
+
+def json_dumps(value: dict[str, object | None]) -> str:
+    import json
+
+    return json.dumps(value, default=str)
+
+
+def _enforce_forgot_password_rate_limit(request: Request, email: str) -> None:
+    import time
+
+    now = time.time()
+    client = request.client.host if request.client else "anonymous"
+    key = f"{client}:{email}"
+    attempts = [timestamp for timestamp in _forgot_password_attempts.get(key, []) if now - timestamp < 900]
+    if len(attempts) >= 5:
+        _forgot_password_attempts[key] = attempts
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many reset attempts. Please try again later.")
+    attempts.append(now)
+    _forgot_password_attempts[key] = attempts
 
 
 def _find_student_by_identifier(db: Session, identifier: str) -> ERPStudent | None:
@@ -281,7 +328,7 @@ def login_student(payload: StudentLoginRequest, db: Session = Depends(get_db)) -
     login_identifier = _normalize_login_identifier(payload.email)
     student = _find_student_by_identifier(db, login_identifier)
 
-    if not student or not verify_password(payload.password, student.password_hash):
+    if not student or not student.is_active or not verify_password(payload.password, student.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
 
     verification_dob = payload.date_of_birth or payload.dob
@@ -298,7 +345,99 @@ def login_student(payload: StudentLoginRequest, db: Session = Depends(get_db)) -
         application_number=student.application_number,
         student_id=student.id,
         student_name=student.application.name if student.application else None,
+        force_password_change=student.force_password_change,
     )
+
+
+@router.post("/forgot-password", response_model=GenericMessageResponse)
+def request_student_password_reset(
+    payload: StudentForgotPasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> GenericMessageResponse:
+    email = _normalize_email(payload.email)
+    aadhaar_number = _normalize_aadhaar_number(payload.aadhaar_number)
+    _enforce_forgot_password_rate_limit(request, email)
+
+    student = db.scalar(select(ERPStudent).where(ERPStudent.email == email, ERPStudent.is_active.is_(True)))
+    stored_aadhaar = _normalize_aadhaar_number(student.application.aadhaar_number) if student and student.application else None
+    if not student or stored_aadhaar != aadhaar_number:
+        _log_password_reset_event(
+            db,
+            student_id=None,
+            action="password_reset_request_failed",
+            new_values={"email": email, "reason": "invalid_email_or_aadhaar"},
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Email or Aadhaar Number")
+
+    now = utc_now()
+    if student.reset_last_attempt_at:
+        last_attempt = student.reset_last_attempt_at
+        if last_attempt.tzinfo is None:
+            last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+        if student.reset_attempt_count >= 5 and now - last_attempt < timedelta(minutes=15):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many reset attempts. Please try again later.")
+
+    raw_token = secrets.token_urlsafe(32)
+    student.reset_token_hash = _hash_reset_token(raw_token)
+    student.reset_token_expires_at = now + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES)
+    student.reset_requested_at = now
+    student.reset_last_attempt_at = now
+    student.reset_attempt_count = (student.reset_attempt_count or 0) + 1
+    db.add(student)
+    _log_password_reset_event(
+        db,
+        student_id=student.id,
+        action="password_reset_requested",
+        new_values={"email": email, "expires_at": student.reset_token_expires_at},
+    )
+    email_status = send_account_email(
+        recipient=student.email,
+        subject="Student password reset link",
+        body=f"Use this reset token within {settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} minutes: {raw_token}",
+    )
+    db.commit()
+    return GenericMessageResponse(
+        message="Password Reset Email Sent" if email_status != "skipped" else f"Password reset token: {raw_token}"
+    )
+
+
+@router.post("/complete-password-reset", response_model=GenericMessageResponse)
+def complete_student_password_reset(
+    payload: StudentCompletePasswordResetRequest,
+    db: Session = Depends(get_db),
+) -> GenericMessageResponse:
+    password_error = validate_password_strength(payload.new_password, payload.confirm_password)
+    if password_error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=password_error)
+
+    token_hash = _hash_reset_token(payload.token)
+    student = db.scalar(select(ERPStudent).where(ERPStudent.reset_token_hash == token_hash))
+    now = utc_now()
+    if not student or not student.reset_token_expires_at:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset link.")
+    expires_at = student.reset_token_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < now:
+        student.reset_token_hash = None
+        student.reset_token_expires_at = None
+        db.add(student)
+        _log_password_reset_event(db, student_id=student.id, action="password_reset_expired")
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password reset link has expired.")
+
+    student.password_hash = hash_password(payload.new_password)
+    student.force_password_change = False
+    student.reset_token_hash = None
+    student.reset_token_expires_at = None
+    student.reset_attempt_count = 0
+    student.reset_last_attempt_at = None
+    db.add(student)
+    _log_password_reset_event(db, student_id=student.id, action="password_reset_completed")
+    db.commit()
+    return GenericMessageResponse(message="Password Changed Successfully")
 
 
 @router.post("/reset-password", response_model=GenericMessageResponse)
@@ -317,7 +456,12 @@ def reset_student_password(
             detail="Student verification details do not match.",
         )
 
+    password_error = validate_password_strength(payload.new_password)
+    if password_error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=password_error)
+
     student.password_hash = hash_password(payload.new_password)
+    student.force_password_change = False
     db.add(student)
     db.commit()
     return GenericMessageResponse(message="Password reset completed successfully.")
@@ -365,8 +509,6 @@ async def save_application_draft(
     student: ERPStudent = Depends(get_current_student),
 ) -> GenericMessageResponse:
     application = _get_or_create_application(student, db)
-    if application.is_verified:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified applications cannot be edited.")
 
     payload, files = await _parse_application_form(request)
     _apply_application_payload(student=student, application=application, payload=payload, files=files)
@@ -384,8 +526,6 @@ async def submit_application(
     student: ERPStudent = Depends(get_current_student),
 ) -> GenericMessageResponse:
     application = _get_or_create_application(student, db)
-    if application.is_verified:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Verified applications cannot be edited.")
 
     payload, files = await _parse_application_form(request)
     _apply_application_payload(student=student, application=application, payload=payload, files=files)
@@ -427,116 +567,6 @@ def save_hostel_preference(
 @router.get("/dashboard", response_model=StudentDashboardResponse)
 def get_dashboard(student: ERPStudent = Depends(get_current_student)) -> StudentDashboardResponse:
     return StudentDashboardResponse(**build_student_dashboard(student))
-
-
-@router.post("/payment/application", response_model=PaymentResponse)
-def pay_application_fee(
-    payload: PaymentRequest,
-    db: Session = Depends(get_db),
-    student: ERPStudent = Depends(get_current_student),
-) -> PaymentResponse:
-    application = student.application
-    if not application or application.form_status != "submitted":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Submit the application first.")
-    existing_payment = latest_application_payment(application)
-    if existing_payment and existing_payment.status == PAYMENT_STATUS_PENDING:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Application fee is waiting for admin approval.")
-    if existing_payment and existing_payment.status == "success":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Application fee is already paid.")
-
-    transaction_id = clean_text(payload.transaction_id) or f"APP-DEMO-{uuid4().hex[:12].upper()}"
-    if transaction_exists(db, transaction_id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Transaction ID already exists.")
-
-    payment_date = utc_now()
-    payment = ERPApplicationPayment(
-        student_id=student.id,
-        application_id=application.id,
-        cycle_reference=application.active_cycle_reference,
-        transaction_id=transaction_id,
-        amount=settings.APP_PAYMENT_AMOUNT,
-        payment_mode=PAYMENT_MODE_DEMO,
-        status=PAYMENT_STATUS_PENDING,
-        payment_date=payment_date,
-    )
-    db.add(payment)
-    db.flush()
-
-    email_status = "not_sent"
-    message = "Application fee submitted and is waiting for admin approval."
-    if settings.DEMO_AUTO_APPROVE:
-        email_status = approve_application_payment(student=student, application=application, payment=payment)
-        message = "Application fee approved automatically in demo mode."
-
-    db.commit()
-
-    return PaymentResponse(
-        message=message,
-        payment_id=payment.id,
-        payment_reference=payment_reference("application", payment.id),
-        status=payment.status,
-        transaction_id=transaction_id,
-        receipt_url=build_asset_url(payment.receipt_path),
-        email_status=email_status,
-        amount=float(settings.APP_PAYMENT_AMOUNT),
-    )
-
-
-@router.post("/payment/hostel", response_model=PaymentResponse)
-def pay_hostel_fee(
-    payload: PaymentRequest,
-    db: Session = Depends(get_db),
-    student: ERPStudent = Depends(get_current_student),
-) -> PaymentResponse:
-    application = student.application
-    if not application or not application.is_shortlisted:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Student is not shortlisted yet.")
-    if not application.allocated_hostel:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Hostel allocation is pending.")
-    existing_payment = latest_hostel_payment(application)
-    if existing_payment and existing_payment.status == PAYMENT_STATUS_PENDING:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Hostel fee is waiting for admin approval.")
-    if existing_payment and existing_payment.status == "success":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Hostel fee is already paid.")
-
-    transaction_id = clean_text(payload.transaction_id) or f"HOSTEL-DEMO-{uuid4().hex[:12].upper()}"
-    if transaction_exists(db, transaction_id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Transaction ID already exists.")
-
-    amount = settings.hostel_fee(application.allocated_hostel)
-    payment_date = utc_now()
-    payment = ERPHostelPayment(
-        student_id=student.id,
-        application_id=application.id,
-        cycle_reference=application.active_cycle_reference,
-        hostel_name=application.allocated_hostel,
-        transaction_id=transaction_id,
-        amount=amount,
-        payment_mode=PAYMENT_MODE_DEMO,
-        status=PAYMENT_STATUS_PENDING,
-        payment_date=payment_date,
-    )
-    db.add(payment)
-    db.flush()
-
-    email_status = "not_sent"
-    message = "Hostel fee submitted and is waiting for admin approval."
-    if settings.DEMO_AUTO_APPROVE:
-        email_status = approve_hostel_payment(student=student, application=application, payment=payment)
-        message = "Hostel fee approved automatically in demo mode."
-
-    db.commit()
-
-    return PaymentResponse(
-        message=message,
-        payment_id=payment.id,
-        payment_reference=payment_reference("hostel", payment.id),
-        status=payment.status,
-        transaction_id=transaction_id,
-        receipt_url=build_asset_url(payment.receipt_path),
-        email_status=email_status,
-        amount=float(amount),
-    )
 
 
 @router.get("/complaints", response_model=ComplaintListResponse)

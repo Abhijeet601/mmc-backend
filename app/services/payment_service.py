@@ -43,7 +43,7 @@ def approve_application_payment(
             "payment_status": payment.status,
             "payment_mode": payment.payment_mode,
             "payment_date": payment.payment_date.strftime("%d %b %Y %I:%M %p"),
-            "amount": f"INR {settings.APP_PAYMENT_AMOUNT}",
+            "amount": f"INR {payment.amount}",
             "student_photo_path": application.student_photo_path,
         }
     )
@@ -52,7 +52,7 @@ def approve_application_payment(
         student_name=application.name or "Student",
         subject="MMC Hostel ERP Application Fee Receipt",
         body=(
-            f"Your {'renewal' if application.application_type == 'renewal' else 'application'} fee payment of INR {settings.APP_PAYMENT_AMOUNT} has been approved. "
+            f"Your {'renewal' if application.application_type == 'renewal' else 'application'} fee payment of INR {payment.amount} has been approved. "
             f"Transaction ID: {payment.transaction_id}."
         ),
         receipt_path=_receipt_absolute_path(receipt_path),

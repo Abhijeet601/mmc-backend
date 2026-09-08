@@ -15,7 +15,6 @@ ROOM_BED_LABELS = ("A", "B", "C")
 PAYMENT_STATUS_PENDING = "pending"
 PAYMENT_STATUS_SUCCESS = "success"
 PAYMENT_STATUS_FAILED = "failed"
-PAYMENT_MODE_DEMO = "demo"
 
 APPLICATION_FIELDS = [
     "name",
@@ -258,6 +257,26 @@ def hostel_status(application: ERPApplication | None) -> str:
     return "preference_pending"
 
 
+def student_payment_status(application: ERPApplication | None) -> str:
+    if not application or application.form_status != "submitted":
+        return PAYMENT_STATUS_PENDING
+
+    app_payment = latest_application_payment(application)
+    hostel_payment = latest_hostel_payment(application)
+    app_status = app_payment.status if app_payment else PAYMENT_STATUS_PENDING
+    hostel_status_value = hostel_payment.status if hostel_payment else PAYMENT_STATUS_PENDING
+
+    if app_status == PAYMENT_STATUS_FAILED or hostel_status_value == PAYMENT_STATUS_FAILED:
+        return PAYMENT_STATUS_FAILED
+    if app_status == PAYMENT_STATUS_SUCCESS and hostel_status_value == PAYMENT_STATUS_SUCCESS:
+        return PAYMENT_STATUS_SUCCESS
+    if app_status == PAYMENT_STATUS_SUCCESS and (application.is_shortlisted or application.allocated_hostel):
+        return "partially_paid"
+    if app_status == PAYMENT_STATUS_SUCCESS:
+        return PAYMENT_STATUS_SUCCESS
+    return PAYMENT_STATUS_PENDING
+
+
 def current_application_status(application: ERPApplication | None) -> str:
     if not application:
         return "Not Started"
@@ -287,7 +306,7 @@ def current_application_status(application: ERPApplication | None) -> str:
 
 
 def can_edit_application(application: ERPApplication | None) -> bool:
-    return application is None or not application.is_verified
+    return True
 
 
 def can_choose_hostel(application: ERPApplication | None) -> bool:
@@ -383,7 +402,7 @@ def tracker_steps(student: ERPStudent, application: ERPApplication | None) -> li
             "description": (
                 "Final hostel fee payment verified and receipt generated."
                 if hostel_payment and hostel_payment.status == PAYMENT_STATUS_SUCCESS
-                else "Payment submitted in demo mode and waiting for admin approval."
+                else "Payment is pending verification by CCAvenue."
                 if hostel_payment and hostel_payment.status == PAYMENT_STATUS_PENDING
                 else "Payment was rejected. Submit it again for admin review."
                 if hostel_payment and hostel_payment.status == PAYMENT_STATUS_FAILED
@@ -426,7 +445,7 @@ def student_notifications(student: ERPStudent, application: ERPApplication | Non
         notifications.append(
             {
                 "title": "Application fee awaiting approval",
-                "description": "Your demo payment has been submitted and is waiting for admin approval.",
+                "description": "Your payment is pending verification by CCAvenue.",
                 "tone": "info",
                 "created_at": app_payment.payment_date,
             }
@@ -817,6 +836,7 @@ def build_student_dashboard(student: ERPStudent) -> dict[str, object | None]:
         "form_status": application.form_status if application else "not_started",
         "verification_status": verification_status(application),
         "application_payment_status": application_payment_status(application),
+        "payment_status": student_payment_status(application),
         "shortlist_status": shortlist_status(application),
         "hostel_status": hostel_status(application),
         "shortlisted": bool(application and application.is_shortlisted),
@@ -868,6 +888,7 @@ def build_admin_student_summary(student: ERPStudent) -> dict[str, object | None]
         "form_status": application.form_status if application else "not_started",
         "verification_status": verification_status(application),
         "application_payment_status": application_payment_status(application),
+        "payment_status": student_payment_status(application),
         "shortlist_status": shortlist_status(application),
         "hostel_status": hostel_status(application),
         "preferred_hostel": application.preferred_hostel if application else None,
@@ -880,6 +901,9 @@ def build_admin_student_summary(student: ERPStudent) -> dict[str, object | None]
         "verified_at": application.verified_at if application else None,
         "shortlisted_at": application.shortlisted_at if application else None,
         "hostel_payment_date": hostel_payment.payment_date if hostel_payment else None,
+        "account_active": student.is_active,
+        "force_password_change": student.force_password_change,
+        "aadhaar_number": application.aadhaar_number if application else None,
     }
 
 
@@ -908,6 +932,8 @@ def build_admin_student_detail(student: ERPStudent) -> dict[str, object | None]:
             "hostel_allocated_at": application.hostel_allocated_at if application else None,
             "is_old_student": student.is_old_student,
             "old_student_status": student.old_student_status,
+            "account_active": student.is_active,
+            "force_password_change": student.force_password_change,
         }
     )
     return dashboard
